@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cyber-claude-harness"
+version = "0.1.0"
+description = "Cybersecurity Claude Code agent harness with AegisSIEM daemon — installs agents, skills, commands, hooks, and MCP servers into target projects"
+requires-python = ">=3.10"
+dependencies = [
+    "asyncssh>=2.14",
+    "httpx>=0.25",
+    "pydantic>=2.0",
+    "pyyaml>=6.0",
+    "watchdog>=3.0",
+    "aiohttp>=3.9",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+    "black>=23.0",
+]
+
+[project.scripts]
+aegissiem-daemon = "daemon.aegissiem_daemon:main"
+cyber-harness = "installer.cli:main"
+
+[tool.setuptools]
+# Include non-Python files in the sdist/wheel
+include-package-data = true
+
+[tool.setuptools.packages.find]
+include = ["daemon*", "installer*"]

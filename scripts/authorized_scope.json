@@ -1,0 +1,52 @@
+{
+  "engagement": {
+    "id": "ENG-2026-001",
+    "name": "Example Engagement",
+    "start_date": "2026-03-17T00:00:00Z",
+    "end_date": "2026-04-17T23:59:59Z",
+    "status": "active"
+  },
+  "authorized_targets": {
+    "ip_ranges": [
+      "10.0.0.0/24",
+      "10.0.1.0/24",
+      "192.168.1.0/24",
+      "172.16.0.0/16"
+    ],
+    "domains": [
+      "*.target.example.com",
+      "api.target.example.com",
+      "app.target.example.com"
+    ],
+    "urls": [
+      "https://app.target.example.com/*",
+      "https://api.target.example.com/*"
+    ],
+    "hosts": [
+      "SRV-WEB01",
+      "SRV-DB01",
+      "SRV-APP01"
+    ]
+  },
+  "excluded_targets": {
+    "ip_ranges": [
+      "10.0.0.1/32",
+      "10.0.2.0/24"
+    ],
+    "domains": [
+      "mail.target.example.com",
+      "vpn.target.example.com"
+    ],
+    "hosts": [
+      "SRV-PROD-GW"
+    ],
+    "notes": "10.0.0.1 is the production gateway. 10.0.2.0/24 is third-party hosted. mail/vpn are business-critical."
+  },
+  "testing_hours": {
+    "enabled": false,
+    "timezone": "UTC",
+    "start_hour": 22,
+    "end_hour": 6,
+    "comment": "Set enabled=true to restrict testing to off-hours only"
+  }
+}

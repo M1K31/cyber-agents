@@ -1,0 +1,20 @@
+{
+  "mcpServers": {
+    "aegissiem": {
+      "command": "python3",
+      "args": ["mcp-servers/aegissiem-server.py"],
+      "description": "AegisSIEM threat data, attacker profiles, honeypot events, and response actions",
+      "tools": [
+        "get_threats",
+        "get_blocked_ips",
+        "get_profiles",
+        "get_honeypot_events",
+        "get_status",
+        "get_approvals",
+        "resolve_threat",
+        "get_threat_summary",
+        "search_knowledge"
+      ]
+    }
+  }
+}

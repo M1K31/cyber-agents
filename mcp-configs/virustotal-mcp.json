@@ -1,0 +1,178 @@
+{
+  "mcpServers": {
+    "virustotal": {
+      "name": "VirusTotal Threat Intelligence",
+      "description": "MCP server interface for the VirusTotal API v3. Enables Blue Team agents to submit file hashes, URLs, domains, and IP addresses for multi-engine reputation scoring, behavioral analysis, and threat intelligence correlation. Requires a VirusTotal API key (free community or premium).",
+      "transport": "http",
+      "baseUrl": "https://www.virustotal.com/api/v3",
+      "authentication": {
+        "type": "header",
+        "header_name": "x-apikey",
+        "value": "${VIRUSTOTAL_API_KEY}",
+        "description": "Set the VIRUSTOTAL_API_KEY environment variable. Free tier: 4 lookups/minute, 500/day, 15.5K/month. Premium tier: higher limits and access to additional endpoints (retrohunt, livehunt, intelligence)."
+      },
+      "headers": {
+        "User-Agent": "cyber-claude-agents/1.0",
+        "Accept": "application/json"
+      },
+      "rateLimiting": {
+        "requestsPerMinute": 4,
+        "dailyLimit": 500,
+        "description": "Free community API limits. Premium users should update these values."
+      },
+      "tools": [
+        {
+          "name": "vt_file_report",
+          "description": "Retrieve the analysis report for a file by its hash. Returns multi-engine antivirus scan results, detection names, file metadata, behavioral sandbox results, and community reputation scores. Use this as the FIRST step when triaging a suspicious file — before manual analysis. Accepts MD5, SHA-1, or SHA-256 hashes. SHA-256 is strongly preferred for accuracy.",
+          "endpoint": "/files/{hash}",
+          "method": "GET",
+          "parameters": {
+            "hash": {
+              "type": "string",
+              "required": true,
+              "description": "File hash to look up. Accepts MD5 (32 hex chars), SHA-1 (40 hex chars), or SHA-256 (64 hex chars). SHA-256 is preferred to avoid hash collisions. Example: '275a021bbfb6489e54d471899f7db9d1663fc695ec2fe2a2c4538aabf651fd0f' (EICAR test file).",
+              "in": "path"
+            }
+          },
+          "response_schema": {
+            "data.attributes.last_analysis_stats": "Object with counts: { malicious, suspicious, undetected, harmless, timeout, failure }",
+            "data.attributes.last_analysis_results": "Per-engine results with category, engine_name, result (detection name)",
+            "data.attributes.popular_threat_classification": "Suggested threat label and threat category from engines",
+            "data.attributes.sha256": "SHA-256 hash of the file",
+            "data.attributes.size": "File size in bytes",
+            "data.attributes.type_description": "File type (e.g., 'PE32 executable', 'PDF document')",
+            "data.attributes.creation_date": "File creation timestamp",
+            "data.attributes.names": "Array of known filenames for this hash",
+            "data.attributes.tags": "Array of tags (e.g., 'peexe', 'signed', 'packed')",
+            "data.attributes.sandbox_verdicts": "Behavioral analysis results from sandbox execution"
+          },
+          "example_usage": "When the ioc-extractor.js hook captures a SHA-256 hash from tool output, use this endpoint to get its reputation. If detection ratio > 5/70, escalate to incident-responder agent. Feed detection names to threat-hunter for YARA rule creation."
+        },
+        {
+          "name": "vt_url_scan",
+          "description": "Submit a URL for scanning by VirusTotal's 70+ URL scanners and retrieve the reputation report. Use this when a suspicious URL is found in logs, emails, or network traffic. The URL is first submitted for analysis (if not recently scanned), then results are retrieved. Returns detection verdicts, final destination (after redirects), serving IP, SSL certificate info, and associated file downloads.",
+          "endpoint": "/urls",
+          "method": "POST",
+          "parameters": {
+            "url": {
+              "type": "string",
+              "required": true,
+              "description": "URL to scan. Must include the protocol (http:// or https://). Example: 'https://suspicious.example.com/payload.exe'. The URL will be base64url-encoded by the client before submission.",
+              "in": "body"
+            }
+          },
+          "response_schema": {
+            "data.id": "Base64url-encoded URL identifier for retrieving results",
+            "data.attributes.last_analysis_stats": "Detection counts: { malicious, suspicious, undetected, harmless }",
+            "data.attributes.last_http_response_content_sha256": "SHA-256 of the page content",
+            "data.attributes.last_final_url": "Final URL after all redirects",
+            "data.attributes.url": "Original submitted URL",
+            "data.attributes.categories": "URL categorization from various engines"
+          },
+          "example_usage": "When /hunt detects outbound connections to unknown URLs, submit them here. If flagged as malicious, extract the serving IP and check with shodan_host_lookup for infrastructure intel."
+        },
+        {
+          "name": "vt_url_report",
+          "description": "Retrieve the analysis report for a previously submitted or known URL. Use this to check URL reputation without triggering a new scan. The URL must be base64url-encoded (without padding) as the URL identifier.",
+          "endpoint": "/urls/{url_id}",
+          "method": "GET",
+          "parameters": {
+            "url_id": {
+              "type": "string",
+              "required": true,
+              "description": "Base64url-encoded URL identifier (no padding). Compute as: base64url(URL) with '=' padding stripped. Example: for 'https://example.com', the id is 'aHR0cHM6Ly9leGFtcGxlLmNvbQ'.",
+              "in": "path"
+            }
+          },
+          "response_schema": {
+            "data.attributes.last_analysis_stats": "Detection counts",
+            "data.attributes.last_analysis_results": "Per-engine verdicts",
+            "data.attributes.last_final_url": "Final URL after redirects",
+            "data.attributes.trackers": "Web trackers found on the page",
+            "data.attributes.html_meta": "Extracted HTML meta tags"
+          },
+          "example_usage": "Use to check if a URL from iocs.csv has been previously analyzed, avoiding unnecessary re-scans and conserving API quota."
+        },
+        {
+          "name": "vt_domain_report",
+          "description": "Retrieve comprehensive DNS and reputation data for a domain. Returns WHOIS info, DNS records, subdomains, associated files (downloaded from/communicating with), historical SSL certificates, and popularity ranking. Use this for domain-level threat intelligence when /hunt or the ioc-extractor identifies a suspicious domain.",
+          "endpoint": "/domains/{domain}",
+          "method": "GET",
+          "parameters": {
+            "domain": {
+              "type": "string",
+              "required": true,
+              "description": "Domain name to look up (without protocol). Example: 'suspicious.example.com'. Do not include 'http://' or trailing paths.",
+              "in": "path"
+            }
+          },
+          "response_schema": {
+            "data.attributes.last_analysis_stats": "Domain reputation detection counts",
+            "data.attributes.registrar": "Domain registrar",
+            "data.attributes.creation_date": "Domain registration date (useful for identifying newly registered domains)",
+            "data.attributes.last_dns_records": "Current DNS records (A, AAAA, MX, NS, TXT, CNAME)",
+            "data.attributes.popularity_ranks": "Ranking from Alexa, Cisco Umbrella, Majestic, etc.",
+            "data.attributes.whois": "Raw WHOIS record text",
+            "data.attributes.categories": "Domain categorization by various engines"
+          },
+          "example_usage": "When a suspicious domain is found, check its creation_date — domains < 30 days old are a strong C2 indicator. Feed WHOIS data to threat-hunter for infrastructure pivoting."
+        },
+        {
+          "name": "vt_ip_report",
+          "description": "Retrieve reputation data, passive DNS, and associated files for an IP address. Returns: geolocation, ASN, WHOIS, detected communicating files (malware samples that contacted this IP), detected URLs hosted on this IP, and historical SSL certificates. Use this for IP-level threat intelligence and C2 infrastructure analysis.",
+          "endpoint": "/ip_addresses/{ip}",
+          "method": "GET",
+          "parameters": {
+            "ip": {
+              "type": "string",
+              "required": true,
+              "description": "IPv4 or IPv6 address to look up. Example: '203.0.113.42'.",
+              "in": "path"
+            }
+          },
+          "response_schema": {
+            "data.attributes.last_analysis_stats": "IP reputation detection counts",
+            "data.attributes.as_owner": "Autonomous System owner organization",
+            "data.attributes.asn": "AS Number",
+            "data.attributes.country": "Country code (ISO 3166-1 alpha-2)",
+            "data.attributes.whois": "WHOIS record",
+            "data.attributes.last_https_certificate": "Most recent SSL certificate seen"
+          },
+          "example_usage": "When /hunt identifies a beaconing destination IP, use this to check how many malware samples communicate with it. A high communicating_files count strongly indicates C2 infrastructure."
+        },
+        {
+          "name": "vt_file_behavior",
+          "description": "Retrieve sandbox behavioral analysis reports for a file hash. Returns: process trees, file operations, registry modifications, network connections (DNS, HTTP, TCP), mutexes, and API calls observed during sandboxed execution. Use this for dynamic analysis triage — understanding what a malware sample DOES without running it yourself.",
+          "endpoint": "/files/{hash}/behaviours",
+          "method": "GET",
+          "parameters": {
+            "hash": {
+              "type": "string",
+              "required": true,
+              "description": "SHA-256 hash of the file. SHA-256 is required (MD5/SHA-1 not supported for this endpoint).",
+              "in": "path"
+            }
+          },
+          "response_schema": {
+            "data[].attributes.sandbox_name": "Name of the sandbox that produced the report",
+            "data[].attributes.processes_tree": "Process execution tree with PIDs and command lines",
+            "data[].attributes.files_opened": "Array of file paths accessed",
+            "data[].attributes.files_written": "Array of file paths written/created",
+            "data[].attributes.files_deleted": "Array of file paths deleted",
+            "data[].attributes.registry_keys_set": "Array of registry keys modified (Windows)",
+            "data[].attributes.dns_lookups": "Array of DNS queries made",
+            "data[].attributes.http_conversations": "Array of HTTP request/response pairs",
+            "data[].attributes.ip_traffic": "Array of IP connections with ports and protocols",
+            "data[].attributes.mutexes_created": "Array of mutex names (useful for YARA rules)",
+            "data[].attributes.calls_highlighted": "Notable API calls flagged by the sandbox"
+          },
+          "example_usage": "After vt_file_report shows a file is malicious, use this to extract network IOCs (C2 domains/IPs) and behavioral indicators (mutexes, file paths) for YARA and Sigma rule creation via the threat-hunter agent."
+        }
+      ],
+      "data_handling": {
+        "description": "File hashes and URLs submitted to VirusTotal become part of their public dataset. Do NOT submit files containing client PII, proprietary code, or confidential documents. Hash lookups (GET) do not share any file content. URL submissions (POST) share the URL itself.",
+        "rule_reference": "rules/data-handling.md"
+      }
+    }
+  }
+}

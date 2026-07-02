@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AegisSIEM Security Dashboard</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <header>
+        <div class="header-content">
+            <h1>AegisSIEM Security Dashboard</h1>
+            <div class="system-status">
+                <span id="status-indicator" class="status-dot disconnected"></span>
+                <span id="status-text">Disconnected</span>
+            </div>
+        </div>
+    </header>
+
+    <main>
+        <!-- Status Bar -->
+        <section id="status-bar" class="status-bar">
+            <div class="stat-card">
+                <div class="stat-value" id="stat-open-threats">--</div>
+                <div class="stat-label">Open Threats</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="stat-blocked-ips">--</div>
+                <div class="stat-label">Blocked IPs</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="stat-active-profiles">--</div>
+                <div class="stat-label">Active Profiles</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="stat-honeypot-events">--</div>
+                <div class="stat-label">Honeypot Events 24h</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="stat-pending-approvals">--</div>
+                <div class="stat-label">Pending Approvals</div>
+            </div>
+        </section>
+
+        <!-- Threats Table -->
+        <section class="dashboard-card">
+            <h2>Threats</h2>
+            <div class="table-wrapper">
+                <table id="threats-table">
+                    <thead>
+                        <tr>
+                            <th>Source IP</th>
+                            <th>Threat Type</th>
+                            <th>Severity</th>
+                            <th>Count</th>
+                            <th>First Seen</th>
+                            <th>Last Seen</th>
+                            <th>Status</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr><td colspan="8" class="empty-state">Loading...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <!-- Blocked IPs Table -->
+        <section class="dashboard-card">
+            <h2>Blocked IPs</h2>
+            <div class="table-wrapper">
+                <table id="blocked-table">
+                    <thead>
+                        <tr>
+                            <th>IP Address</th>
+                            <th>Router</th>
+                            <th>Blocked At</th>
+                            <th>Blocked By</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr><td colspan="5" class="empty-state">Loading...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <!-- Attacker Profiles Table -->
+        <section class="dashboard-card">
+            <h2>Attacker Profiles</h2>
+            <div class="table-wrapper">
+                <table id="profiles-table">
+                    <thead>
+                        <tr>
+                            <th>IP Address</th>
+                            <th>Escalation Level</th>
+                            <th>Total Attempts</th>
+                            <th>Country</th>
+                            <th>ASN Org</th>
+                            <th>Reverse DNS</th>
+                            <th>Last Seen</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr><td colspan="7" class="empty-state">Loading...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <!-- Honeypot Events Table -->
+        <section class="dashboard-card">
+            <h2>Honeypot Events</h2>
+            <div class="table-wrapper">
+                <table id="honeypot-table">
+                    <thead>
+                        <tr>
+                            <th>Timestamp</th>
+                            <th>Attacker IP</th>
+                            <th>Port</th>
+                            <th>Service</th>
+                            <th>Event Type</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr><td colspan="5" class="empty-state">Loading...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <!-- Approvals Section -->
+        <section class="dashboard-card">
+            <h2>Pending Approvals</h2>
+            <div id="approvals-container">
+                <div class="empty-state">Loading...</div>
+            </div>
+        </section>
+    </main>
+
+    <footer>
+        <p>AegisSIEM Daemon &mdash; <span id="last-update">Never</span></p>
+    </footer>
+
+    <div id="toast-container"></div>
+
+    <script src="app.js"></script>
+</body>
+</html>

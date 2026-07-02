@@ -1,0 +1,165 @@
+{
+  "mcpServers": {
+    "shodan": {
+      "name": "Shodan Internet Intelligence",
+      "description": "MCP server interface for the Shodan API. Enables Red Team agents to query internet-wide scan data for host reconnaissance — open ports, service banners, SSL certificates, vulnerabilities, and organization metadata. Requires a valid Shodan API key.",
+      "transport": "http",
+      "baseUrl": "https://api.shodan.io",
+      "authentication": {
+        "type": "query_parameter",
+        "parameter_name": "key",
+        "value": "${SHODAN_API_KEY}",
+        "description": "Set the SHODAN_API_KEY environment variable with your Shodan API key. Free tier allows 1 query/second and limited results. Membership/Enterprise tiers unlock filters, bulk queries, and on-demand scanning."
+      },
+      "headers": {
+        "User-Agent": "cyber-claude-agents/1.0",
+        "Accept": "application/json"
+      },
+      "rateLimiting": {
+        "requestsPerSecond": 1,
+        "burstLimit": 5,
+        "description": "Free tier: 1 req/s. Adjust for paid plans."
+      },
+      "tools": [
+        {
+          "name": "shodan_host_lookup",
+          "description": "Look up all known open ports, services, banners, SSL certificates, and vulnerabilities for a specific IP address. Use this when you have a target IP and need to understand its attack surface WITHOUT actively scanning it. This is passive reconnaissance — Shodan's data comes from their own internet-wide scans, not from probing the target. Returns: ports, protocols, banners, hostnames, OS, organization, ISP, ASN, geolocation, and any CVEs associated with detected services.",
+          "endpoint": "/shodan/host/{ip}",
+          "method": "GET",
+          "parameters": {
+            "ip": {
+              "type": "string",
+              "required": true,
+              "description": "Target IPv4 address (e.g., '8.8.8.8'). Must be a single IP, not a CIDR range. Must be within authorized engagement scope per rules/safe-harbor.md.",
+              "in": "path"
+            },
+            "minify": {
+              "type": "boolean",
+              "required": false,
+              "default": false,
+              "description": "If true, return only the list of open ports and general host info (reduces response size). Set to true for initial triage, false for detailed analysis.",
+              "in": "query"
+            },
+            "history": {
+              "type": "boolean",
+              "required": false,
+              "default": false,
+              "description": "If true, include the full historical banners for the host. Useful for tracking changes over time or identifying recently closed ports. Requires a paid Shodan plan.",
+              "in": "query"
+            }
+          },
+          "response_schema": {
+            "ip_str": "Target IP address",
+            "ports": "Array of open port numbers",
+            "hostnames": "Array of associated hostnames",
+            "org": "Organization that owns the IP",
+            "isp": "Internet Service Provider",
+            "asn": "Autonomous System Number",
+            "os": "Detected operating system",
+            "vulns": "Array of CVE identifiers for known vulnerabilities",
+            "data": "Array of service banner objects with port, transport, product, version, banner text, SSL certificate details"
+          },
+          "example_usage": "Use when the /scan command identifies a target IP and you need passive intel before active scanning. Feed results to the exploit-researcher agent for CVE triage."
+        },
+        {
+          "name": "shodan_search",
+          "description": "Search Shodan's database using its powerful query syntax (Shodan dorks). Use this to discover hosts matching specific service, product, vulnerability, or organization criteria across the internet. This is a PASSIVE search against Shodan's existing data — no packets are sent to targets. Useful for: finding exposed services within a client's ASN, identifying all hosts running a specific vulnerable product version, or discovering internet-facing infrastructure for scope validation.",
+          "endpoint": "/shodan/host/search",
+          "method": "GET",
+          "parameters": {
+            "query": {
+              "type": "string",
+              "required": true,
+              "description": "Shodan search query using filter syntax. Examples: 'org:\"Target Corp\" port:443', 'product:Apache version:2.4.49 country:US', 'vuln:CVE-2021-44228', 'ssl.cert.subject.cn:target.example.com', 'net:10.0.0.0/24 port:22,80,443'. Combine filters with spaces (AND logic).",
+              "in": "query"
+            },
+            "facets": {
+              "type": "string",
+              "required": false,
+              "description": "Comma-separated list of properties to get summary counts. Examples: 'port', 'org', 'country', 'vuln', 'product'. Useful for understanding the distribution of results without paginating through all matches.",
+              "in": "query"
+            },
+            "page": {
+              "type": "integer",
+              "required": false,
+              "default": 1,
+              "description": "Page number for results pagination. Each page contains up to 100 results. Requires a paid plan for pages > 1.",
+              "in": "query"
+            }
+          },
+          "response_schema": {
+            "total": "Total number of matching results",
+            "matches": "Array of host objects (same structure as host lookup)",
+            "facets": "Summary counts grouped by requested facet properties"
+          },
+          "example_usage": "Use to enumerate all internet-facing assets for a target organization: query='org:\"Target Corp\"'. Then feed discovered IPs to the /scan command for active verification."
+        },
+        {
+          "name": "shodan_dns_resolve",
+          "description": "Resolve a hostname to its IP address(es) using Shodan's DNS infrastructure. Use this for DNS resolution that doesn't leak queries through the operator's local resolver — a key OPSEC requirement per rules/opsec.md. Also useful for bulk resolution of discovered subdomains.",
+          "endpoint": "/dns/resolve",
+          "method": "GET",
+          "parameters": {
+            "hostnames": {
+              "type": "string",
+              "required": true,
+              "description": "Comma-separated list of hostnames to resolve. Maximum 100 hostnames per request. Example: 'target.example.com,api.target.example.com,mail.target.example.com'.",
+              "in": "query"
+            }
+          },
+          "response_schema": {
+            "<hostname>": "Resolved IPv4 address for each hostname (key-value map)"
+          },
+          "example_usage": "After subdomain enumeration (Amass, subfinder), resolve all discovered subdomains through Shodan to avoid DNS leaks. Feed results to shodan_host_lookup for passive recon."
+        },
+        {
+          "name": "shodan_dns_reverse",
+          "description": "Perform reverse DNS lookups on IP addresses to discover associated hostnames. Use this to identify what domains are hosted on a target IP — useful for virtual host enumeration and discovering additional attack surface.",
+          "endpoint": "/dns/reverse",
+          "method": "GET",
+          "parameters": {
+            "ips": {
+              "type": "string",
+              "required": true,
+              "description": "Comma-separated list of IPv4 addresses for reverse DNS lookup. Maximum 100 IPs per request.",
+              "in": "query"
+            }
+          },
+          "response_schema": {
+            "<ip>": "Array of hostnames associated with the IP address"
+          },
+          "example_usage": "After /scan discovers open web servers, use reverse DNS to find all virtual hosts — each may have different applications and vulnerabilities."
+        },
+        {
+          "name": "shodan_exploits_search",
+          "description": "Search Shodan's exploit database (aggregated from Exploit-DB, Metasploit, CVE) for known exploits matching a query. Use this to quickly find available exploits for a discovered service or CVE before delegating detailed analysis to the exploit-researcher agent.",
+          "endpoint": "/api-ms/exploits/search",
+          "method": "GET",
+          "parameters": {
+            "query": {
+              "type": "string",
+              "required": true,
+              "description": "Search query for exploits. Can be a CVE ID (e.g., 'CVE-2021-44228'), product name (e.g., 'Apache 2.4.49'), or keyword (e.g., 'remote code execution SMB'). Use Shodan's filter syntax for precision.",
+              "in": "query"
+            },
+            "facets": {
+              "type": "string",
+              "required": false,
+              "description": "Facet properties for summary counts: 'type' (exploit type), 'platform', 'source' (Exploit-DB, Metasploit, etc.).",
+              "in": "query"
+            }
+          },
+          "response_schema": {
+            "total": "Number of matching exploits",
+            "matches": "Array of exploit objects with: description, source, platform, CVE list, code/URL"
+          },
+          "example_usage": "After shodan_host_lookup reveals Apache 2.4.49, search for 'Apache 2.4.49 path traversal' to find CVE-2021-41773 exploits. Pass results to exploit-researcher for PoC development."
+        }
+      ],
+      "scope_enforcement": {
+        "description": "All target IPs and domains queried through this MCP server MUST be validated against scripts/authorized_scope.json before the request is made. The pre-command-scope-check.js hook does NOT automatically intercept MCP calls — agents must self-enforce.",
+        "rule_reference": "rules/safe-harbor.md"
+      }
+    }
+  }
+}

@@ -1,0 +1,11 @@
+recursive-include agents *.md
+recursive-include skills *.md
+recursive-include commands *.md
+recursive-include rules *.md
+recursive-include contexts *.md
+recursive-include mcp-configs *.json
+recursive-include mcp-servers *.py
+recursive-include scripts *.sh *.js *.json
+recursive-include hooks *.json
+recursive-include dashboard *.html *.css *.js
+include CLAUDE.md

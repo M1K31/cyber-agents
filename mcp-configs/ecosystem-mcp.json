@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "ecosystem": {
+      "command": "python3",
+      "args": ["mcp-servers/ecosystem-server.py"],
+      "description": "appEcosystem service registry and event bus bridge",
+      "tools": [
+        "publish_event",
+        "discover_service",
+        "get_registry_status"
+      ]
+    }
+  }
+}

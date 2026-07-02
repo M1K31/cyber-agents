@@ -1,0 +1,64 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "tool == \"Bash\"",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node scripts/hooks/pre-command-scope-check.js",
+            "description": "Validates command targets against authorized_scope.json. Blocks out-of-scope offensive commands.",
+            "timeout_ms": 5000
+          }
+        ]
+      },
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node scripts/hooks/threat-data-watcher.js",
+            "description": "Checks vault/threat-data/ for recent high-severity threats and injects them as context.",
+            "timeout_ms": 3000
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "tool == \"Bash\" || tool == \"Read\" || tool == \"Grep\"",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node scripts/hooks/ioc-extractor.js",
+            "description": "Extracts IOCs (IPs, domains, hashes, URLs) from tool output and appends to vault/iocs.csv.",
+            "timeout_ms": 3000
+          }
+        ]
+      },
+      {
+        "matcher": "tool == \"Bash\"",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node scripts/hooks/ecosystem-event-publisher.js",
+            "description": "Detects iptables block/unblock commands and publishes events to the ecosystem registry.",
+            "timeout_ms": 5000
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node scripts/hooks/post-session-sanitize.js",
+            "description": "Scans session context for private keys, credentials, and API tokens. Redacts and logs findings.",
+            "timeout_ms": 10000
+          }
+        ]
+      }
+    ]
+  }
+}

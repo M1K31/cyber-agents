@@ -1,0 +1,247 @@
+{
+  "mcpServers": {
+    "splunk": {
+      "name": "Splunk SIEM / Log Analytics",
+      "description": "MCP server interface for a Splunk Enterprise or Splunk Cloud instance. Enables the Threat Hunter agent to submit SPL (Search Processing Language) queries against log indices, retrieve search results, and manage saved searches. Also supports generic SIEM endpoints (Elasticsearch/OpenSearch via a secondary configuration). Requires a Splunk authentication token with search capabilities.",
+      "transport": "http",
+      "baseUrl": "${SPLUNK_BASE_URL}",
+      "authentication": {
+        "type": "header",
+        "header_name": "Authorization",
+        "value": "Bearer ${SPLUNK_AUTH_TOKEN}",
+        "description": "Set SPLUNK_BASE_URL (e.g., 'https://splunk.corp.example.com:8089') and SPLUNK_AUTH_TOKEN environment variables. The token must have the 'search' capability at minimum. For Splunk Cloud, use the API endpoint from your cloud stack."
+      },
+      "headers": {
+        "User-Agent": "cyber-claude-agents/1.0",
+        "Accept": "application/json",
+        "Content-Type": "application/x-www-form-urlencoded"
+      },
+      "tls": {
+        "verify_ssl": true,
+        "description": "Set to false only if the Splunk instance uses a self-signed certificate in a lab environment. In production, always verify SSL."
+      },
+      "rateLimiting": {
+        "concurrentSearches": 3,
+        "maxSearchWindow": "24h",
+        "description": "Limit concurrent searches to avoid impacting SIEM performance. Default search window is 24 hours — extend only when needed for historical hunts."
+      },
+      "tools": [
+        {
+          "name": "splunk_search",
+          "description": "Submit a one-shot SPL search query and retrieve results. This is the primary tool for log-based threat hunting. The search is executed synchronously (blocking) and results are returned when complete. Use this for targeted queries that are expected to complete within the timeout window. For long-running searches over large datasets, use splunk_search_async instead. The SPL query MUST include a time range (earliest/latest) to bound the search.",
+          "endpoint": "/services/search/jobs/export",
+          "method": "POST",
+          "parameters": {
+            "search": {
+              "type": "string",
+              "required": true,
+              "description": "SPL search query. MUST begin with 'search' command or '|' for generating commands. Always include index specification and time bounds. Examples:\n- 'search index=security EventCode=4625 | stats count by Account_Name, Source_Network_Address | where count > 10'\n- 'search index=proxy dest_ip=203.0.113.42 | table _time src_ip dest_ip dest_port url'\n- '| tstats count where index=sysmon EventCode=1 by host, process_name | sort -count'\nIMPORTANT: Never run unbounded searches (no time range, no index filter). This will impact SIEM performance.",
+              "in": "body"
+            },
+            "earliest_time": {
+              "type": "string",
+              "required": true,
+              "description": "Search start time. Use Splunk relative time modifiers: '-24h' (last 24 hours), '-7d' (last 7 days), '-1h' (last hour), or absolute: '2026-03-17T00:00:00'. Always specify to bound the search.",
+              "in": "body"
+            },
+            "latest_time": {
+              "type": "string",
+              "required": false,
+              "default": "now",
+              "description": "Search end time. Defaults to 'now'. Use absolute time for historical hunts.",
+              "in": "body"
+            },
+            "output_mode": {
+              "type": "string",
+              "required": false,
+              "default": "json",
+              "description": "Output format: 'json' (default, best for LLM processing), 'csv', or 'xml'.",
+              "in": "body"
+            },
+            "count": {
+              "type": "integer",
+              "required": false,
+              "default": 1000,
+              "description": "Maximum number of results to return. Set to 0 for unlimited (use with caution). Default 1000 to prevent overwhelming the agent context.",
+              "in": "body"
+            }
+          },
+          "response_schema": {
+            "results": "Array of result objects, each containing field names as keys and their values. The specific fields depend on the SPL query used.",
+            "messages": "Array of diagnostic messages (info, warnings, errors from the search)"
+          },
+          "example_usage": "Threat hunter hypothesis: 'lateral movement via PsExec'. Query: 'search index=sysmon EventCode=1 ParentImage=*services.exe Image=*PSEXESVC* | table _time host User Image CommandLine'. Feed results to the /hunt command for correlation."
+        },
+        {
+          "name": "splunk_search_async",
+          "description": "Submit a long-running SPL search job asynchronously. Returns a search job ID (sid) that can be polled for status and results. Use this for complex queries over large datasets, historical hunts spanning weeks/months, or statistical analyses that require significant compute. The search runs in the background on the Splunk cluster.",
+          "endpoint": "/services/search/jobs",
+          "method": "POST",
+          "parameters": {
+            "search": {
+              "type": "string",
+              "required": true,
+              "description": "SPL search query (same syntax as splunk_search). For async jobs, complex transforming commands (stats, timechart, rare, eventstats) are common.",
+              "in": "body"
+            },
+            "earliest_time": {
+              "type": "string",
+              "required": true,
+              "description": "Search start time in Splunk relative or absolute format.",
+              "in": "body"
+            },
+            "latest_time": {
+              "type": "string",
+              "required": false,
+              "default": "now",
+              "description": "Search end time.",
+              "in": "body"
+            },
+            "exec_mode": {
+              "type": "string",
+              "required": false,
+              "default": "normal",
+              "description": "Execution mode: 'normal' (full search, indexed results), 'blocking' (wait for completion), 'oneshot' (same as splunk_search).",
+              "in": "body"
+            }
+          },
+          "response_schema": {
+            "sid": "Search job ID. Use with splunk_search_status and splunk_search_results to monitor and retrieve.",
+            "response.messages": "Array of messages about the job submission"
+          },
+          "example_usage": "Use for broad hunts: 'search index=* earliest=-30d EventCode=4768 TicketEncryptionType=0x17 | stats count by Account_Name, Client_Address | where count > 50' (detecting AS-REP roasting over 30 days)."
+        },
+        {
+          "name": "splunk_search_status",
+          "description": "Check the status of an asynchronous search job submitted via splunk_search_async. Returns the job's completion state, progress percentage, event count, and any errors. Poll this endpoint until the job status is 'DONE' before retrieving results.",
+          "endpoint": "/services/search/jobs/{sid}",
+          "method": "GET",
+          "parameters": {
+            "sid": {
+              "type": "string",
+              "required": true,
+              "description": "Search job ID returned by splunk_search_async.",
+              "in": "path"
+            },
+            "output_mode": {
+              "type": "string",
+              "required": false,
+              "default": "json",
+              "in": "query"
+            }
+          },
+          "response_schema": {
+            "entry[0].content.dispatchState": "Job state: 'QUEUED', 'PARSING', 'RUNNING', 'PAUSED', 'FINALIZING', 'DONE', 'FAILED'",
+            "entry[0].content.doneProgress": "Completion progress (0.0 to 1.0)",
+            "entry[0].content.eventCount": "Number of events scanned so far",
+            "entry[0].content.resultCount": "Number of results generated so far",
+            "entry[0].content.runDuration": "Elapsed time in seconds"
+          },
+          "example_usage": "After submitting an async search, poll this every 5 seconds. When dispatchState='DONE', call splunk_search_results to retrieve the output."
+        },
+        {
+          "name": "splunk_search_results",
+          "description": "Retrieve the results of a completed search job. Only call this after splunk_search_status confirms the job is 'DONE'. Returns the result rows in the requested output format.",
+          "endpoint": "/services/search/jobs/{sid}/results",
+          "method": "GET",
+          "parameters": {
+            "sid": {
+              "type": "string",
+              "required": true,
+              "description": "Search job ID from splunk_search_async.",
+              "in": "path"
+            },
+            "output_mode": {
+              "type": "string",
+              "required": false,
+              "default": "json",
+              "in": "query"
+            },
+            "count": {
+              "type": "integer",
+              "required": false,
+              "default": 1000,
+              "description": "Maximum results to return. Use offset for pagination.",
+              "in": "query"
+            },
+            "offset": {
+              "type": "integer",
+              "required": false,
+              "default": 0,
+              "description": "Starting offset for pagination.",
+              "in": "query"
+            }
+          },
+          "response_schema": {
+            "results": "Array of result objects with field/value pairs from the search",
+            "init_offset": "Starting offset of the returned results",
+            "messages": "Diagnostic messages"
+          },
+          "example_usage": "Retrieve results, then feed them to the LLM for analysis. For large result sets, paginate with offset and count to avoid context overflow."
+        },
+        {
+          "name": "splunk_notable_events",
+          "description": "Query Splunk Enterprise Security notable events (security alerts). This searches the 'notable' index used by Splunk ES for correlated alerts, providing pre-triaged security events with severity, urgency, and owner assignments. Use this as the starting point for incident triage before deep-diving into raw logs.",
+          "endpoint": "/services/search/jobs/export",
+          "method": "POST",
+          "parameters": {
+            "search": {
+              "type": "string",
+              "required": true,
+              "description": "SPL query against the notable index. Example: 'search index=notable severity=critical OR severity=high | table _time rule_name src dest severity urgency status_label owner | sort -_time'. Always filter by time range and severity to avoid overwhelming results.",
+              "in": "body"
+            },
+            "earliest_time": {
+              "type": "string",
+              "required": true,
+              "description": "Search start time.",
+              "in": "body"
+            },
+            "latest_time": {
+              "type": "string",
+              "required": false,
+              "default": "now",
+              "in": "body"
+            },
+            "output_mode": {
+              "type": "string",
+              "required": false,
+              "default": "json",
+              "in": "body"
+            }
+          },
+          "response_schema": {
+            "results": "Array of notable event objects with fields: _time, rule_name, src, dest, severity, urgency, status_label, owner, rule_description, security_domain"
+          },
+          "example_usage": "Use at the start of a hunt to see what the SIEM has already correlated. Look for high-severity notables in the hunt timeframe, then pivot into raw logs with splunk_search for deeper analysis."
+        }
+      ],
+      "spl_reference": {
+        "description": "Common SPL patterns for threat hunting. Agents should reference these when constructing queries.",
+        "patterns": {
+          "failed_logins": "search index=security EventCode=4625 | stats count by Account_Name, Source_Network_Address | where count > 10 | sort -count",
+          "new_services": "search index=sysmon EventCode=1 ParentImage=*services.exe | stats count by host, Image, CommandLine | sort -count",
+          "powershell_execution": "search index=sysmon EventCode=1 Image=*powershell* OR Image=*pwsh* | table _time host User CommandLine ParentImage",
+          "dns_beaconing": "search index=dns | stats count dc(query) as unique_queries avg(query_length) as avg_len by src_ip dest_ip | where count > 100 AND avg_len > 30",
+          "lateral_movement_smb": "search index=security EventCode=5145 Relative_Target_Name=*.exe OR Relative_Target_Name=*.dll | stats count by Account_Name, Source_Address, Share_Name | sort -count",
+          "process_injection": "search index=sysmon EventCode=8 | table _time host SourceImage TargetImage StartAddress | sort -_time",
+          "scheduled_task_creation": "search index=sysmon EventCode=1 Image=*schtasks* CommandLine=*/create* | table _time host User CommandLine",
+          "data_exfil_large_transfers": "search index=proxy | stats sum(bytes_out) as total_bytes by src_ip dest_ip | where total_bytes > 104857600 | eval mb=round(total_bytes/1048576,2) | sort -total_bytes"
+        }
+      },
+      "elasticsearch_alternative": {
+        "description": "For environments using Elasticsearch/OpenSearch instead of Splunk, configure the following alternative settings.",
+        "baseUrl": "${ELASTICSEARCH_URL}",
+        "authentication": {
+          "type": "header",
+          "header_name": "Authorization",
+          "value": "ApiKey ${ELASTICSEARCH_API_KEY}",
+          "description": "Elasticsearch API key encoded as base64(id:api_key). Or use Basic auth: 'Basic base64(user:pass)'."
+        },
+        "search_endpoint": "/{index}/_search",
+        "query_language": "KQL / Lucene / Elasticsearch DSL",
+        "note": "When using Elasticsearch, agents should translate SPL patterns to equivalent KQL or DSL queries. The threat-hunter agent can perform this translation."
+      }
+    }
+  }
+}
