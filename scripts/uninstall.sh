@@ -4,26 +4,39 @@
 #
 # Removes: the running process, the LaunchAgent (com.smartindustries.cyber-harness),
 # the internal-disk runtime (~/.local/share/cyber-harness), logs in
-# ~/Library/Logs/CyberHarness, and local state in ~/.cyber-harness (detection
-# history, honeypot events, SQLite DBs).
+# ~/Library/Logs/CyberHarness, and local state in ~/.aegissiem-daemon (detection
+# history, honeypot events, SQLite DBs — see daemon/db.py and
+# daemon/aegissiem_daemon.py for the source-of-truth paths).
 #
 # This deletes stored threats, approvals, and honeypot events. To keep them for a
 # later reinstall, use the sibling script that preserves user data.
 #
-# Only paths owned by this project are touched. This script never removes
-# ~/.aegissiem (AegisSIEM's own state dir) or any other project's directory.
+# Only paths owned by this project are touched.
+#
+# SAFETY: the state dir this script deletes is ~/.aegissiem-daemon, spelled
+# out literally below. That is a DIFFERENT directory from AegisSIEM's own
+# state dir (a different project, one directory name that is one suffix
+# shorter). This script must never touch that other directory. Do not
+# "simplify" STATE_DIR by trimming the "-daemon" suffix or building it from
+# a shared prefix/glob — that exact class of cross-project deletion bug has
+# already been found and fixed once in this ecosystem.
 #
 # Usage:
 #   ./scripts/uninstall.sh              # FULL removal (asks to confirm)
 #   ./scripts/uninstall.sh --yes        # FULL removal, no prompt (CI/automation)
 #   ./scripts/uninstall.sh --dry-run    # print what would happen
-#   ./scripts/uninstall-keep-data.sh    # remove service+runtime, KEEP ~/.cyber-harness
+#   ./scripts/uninstall-keep-data.sh    # remove service+runtime, KEEP state dir
 #
 set -euo pipefail
 
 LABEL="com.smartindustries.cyber-harness"
 PREFIX="${CYBER_HARNESS_PREFIX:-$HOME/.local/share/cyber-harness}"
-STATE_DIR="$HOME/.cyber-harness"
+STATE_DIR="${CYBER_HARNESS_STATE_DIR:-$HOME/.aegissiem-daemon}"
+# One-time-migration leftover from an earlier installer version; the daemon
+# never reads this path. Removed unconditionally below via bare rmdir (only
+# succeeds if empty), never rm -rf, so it is safe even if something unexpected
+# is in there.
+LEGACY_STATE_DIR="$HOME/.cyber-harness"
 LOG_DIR="$HOME/Library/Logs/CyberHarness"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 
@@ -78,6 +91,13 @@ if $KEEP_DATA; then
 else
     echo "==> Deleting user state $STATE_DIR..."
     run "rm -rf \"$STATE_DIR\""
+fi
+
+# Legacy unused dir cleanup — safe in both modes: bare rmdir only removes it
+# if it's empty, and it never held real data (the daemon never wrote there).
+if [[ -d "$LEGACY_STATE_DIR" ]]; then
+    echo "==> Removing unused legacy dir $LEGACY_STATE_DIR (if empty)..."
+    run "rmdir \"$LEGACY_STATE_DIR\" 2>/dev/null || true"
 fi
 
 echo "==> cyber-harness uninstalled. Reinstall with: ./scripts/install-local.sh"

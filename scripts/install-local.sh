@@ -20,8 +20,27 @@ PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 WRITE_PLIST=false
 for a in "$@"; do case "$a" in --plist) WRITE_PLIST=true ;; esac; done
 
+# The daemon's real state dir (db, config.yml, vault/threat-data) is
+# ~/.aegissiem-daemon — see daemon/db.py:DEFAULT_DB_PATH and
+# daemon/aegissiem_daemon.py:CONFIG_PATH/VAULT_THREAT_DIR. It is NOT
+# ~/.cyber-harness (an older, unused path) and it is NOT ~/.aegissiem
+# (AegisSIEM's own state dir, a different project). Keep this literal —
+# do not derive it from PREFIX or any other path.
+STATE_DIR="${CYBER_HARNESS_STATE_DIR:-$HOME/.aegissiem-daemon}"
+
 echo "==> Installing cyber-harness runtime to $PREFIX"
-mkdir -p "$PREFIX" "$HOME/.cyber-harness"
+mkdir -p "$PREFIX" "$STATE_DIR"
+
+# One-time migration cleanup: an earlier version of this installer created
+# ~/.cyber-harness, which the daemon never reads. Only remove it here if it
+# is empty (rmdir, not rm -rf) so we never touch real data by accident.
+LEGACY_STATE_DIR="$HOME/.cyber-harness"
+if [ -d "$LEGACY_STATE_DIR" ]; then
+    rmdir "$LEGACY_STATE_DIR" 2>/dev/null \
+        && echo "==> Removed unused legacy dir $LEGACY_STATE_DIR" \
+        || echo "!!  $LEGACY_STATE_DIR exists and is non-empty — leaving it in place" >&2
+fi
+
 [ -d "$VENV" ] || "$PY" -m venv "$VENV"
 "$VENV/bin/pip" install --upgrade pip wheel >/dev/null
 [ -f "$REPO/daemon/requirements.txt" ] && "$VENV/bin/pip" install -r "$REPO/daemon/requirements.txt"
@@ -52,7 +71,7 @@ if $WRITE_PLIST; then
   <key>EnvironmentVariables</key><dict>
     <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
     <key>HOME</key><string>$HOME</string>
-    <key>CYBER_HARNESS_PORT</key><string>$PORT</string>
+    <key>AEGISSIEM_PORT</key><string>$PORT</string>
   </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
