@@ -246,36 +246,34 @@ def create_api(db: Database, pipeline: ResponsePipeline) -> web.Application:
             )
             prompt += f"\n\nRecent threats:\n{threat_summary}"
 
-        # Call Ollama
-        ollama_url = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
-        model = os.environ.get("OLLAMA_MODEL", "llama3")
+        # Route through the ecosystem provider router rather than calling Ollama
+        # directly, so a user who enabled Claude/Gemini/OpenAI in the shared AI
+        # profile actually gets that provider. Ollama stays the default.
+        # The response shape is unchanged — command_router and llm_service
+        # both consume {"status", "result", "model", "source"}.
+        from .llm_backend import AnalysisUnavailable, analyze as _analyze
+
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    f"{ollama_url}/api/generate",
-                    json={"model": model, "prompt": prompt, "stream": False},
-                    timeout=aiohttp.ClientTimeout(total=120),
-                ) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        return web.json_response({
-                            "status": "ok",
-                            "result": data.get("response", ""),
-                            "model": model,
-                            "source": "harness",
-                        })
-                    else:
-                        text = await resp.text()
-                        return web.json_response(
-                            {"status": "error", "error": f"Ollama returned {resp.status}: {text}"},
-                            status=502,
-                        )
-        except Exception as e:
-            logger.error("Analyze endpoint failed: %s", e)
+            text, model, provider = await _analyze(prompt)
+        except AnalysisUnavailable as e:
             return web.json_response(
                 {"status": "error", "error": str(e)},
+                status=503,
+            )
+        except Exception as e:
+            logger.error("Analyze endpoint failed: %s", e.__class__.__name__)
+            return web.json_response(
+                {"status": "error", "error": "analysis failed"},
                 status=500,
             )
+
+        return web.json_response({
+            "status": "ok",
+            "result": text,
+            "model": model,
+            "source": "harness",
+            "provider": provider,
+        })
 
     app.router.add_get("/api/status", get_status)
     app.router.add_get("/api/threats", get_threats)
