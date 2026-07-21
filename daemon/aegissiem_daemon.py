@@ -291,6 +291,30 @@ def create_api(db: Database, pipeline: ResponsePipeline) -> web.Application:
     return app
 
 
+def _abort_if_already_serving(port: int) -> None:
+    """Exactly one harness daemon per machine.
+
+    launchd is the sole owner. `ecosystem start-all` and a manual run are both
+    possible second start vectors, and two daemons on one SQLite state dir would
+    double-count threats and double-fire auto-block actions.
+    """
+    import httpx
+
+    try:
+        r = httpx.get(f"http://127.0.0.1:{port}/api/status", timeout=2)
+        if r.status_code == 200:
+            logger.error(
+                "A harness daemon is already serving on port %s — exiting. "
+                "launchd owns this service (com.smartindustries.cyber-harness).",
+                port,
+            )
+            raise SystemExit(0)
+    except SystemExit:
+        raise
+    except Exception:
+        pass  # Nothing healthy there: we are the owner.
+
+
 # ── Daily Summary ───────────────────────────────────────────────────
 
 async def daily_summary_loop(db: Database, pipeline: ResponsePipeline):
@@ -376,6 +400,7 @@ async def run_daemon():
         or os.environ.get("ASUSGUARD_PORT")
         or config.get("api_port", 8088)
     )
+    _abort_if_already_serving(api_port)
     app = create_api(db, pipeline)
     runner = web.AppRunner(app)
     await runner.setup()
