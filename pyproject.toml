@@ -3,9 +3,9 @@ requires = ["setuptools>=68.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "cyber-claude-harness"
+name = "cyber-agents"
 version = "0.1.0"
-description = "Cybersecurity Claude Code agent harness with AegisSIEM daemon — installs agents, skills, commands, hooks, and MCP servers into target projects"
+description = "Cyber Agents — cybersecurity agent harness with the AegisSIEM daemon; installs agents, skills, commands, hooks and MCP servers into ecosystem projects"
 requires-python = ">=3.10"
 dependencies = [
     "asyncssh>=2.14",

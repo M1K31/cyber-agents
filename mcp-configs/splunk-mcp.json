@@ -12,7 +12,7 @@
         "description": "Set SPLUNK_BASE_URL (e.g., 'https://splunk.corp.example.com:8089') and SPLUNK_AUTH_TOKEN environment variables. The token must have the 'search' capability at minimum. For Splunk Cloud, use the API endpoint from your cloud stack."
       },
       "headers": {
-        "User-Agent": "cyber-claude-agents/1.0",
+        "User-Agent": "cyber-agents/1.0",
         "Accept": "application/json",
         "Content-Type": "application/x-www-form-urlencoded"
       },

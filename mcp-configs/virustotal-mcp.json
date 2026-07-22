@@ -12,7 +12,7 @@
         "description": "Set the VIRUSTOTAL_API_KEY environment variable. Free tier: 4 lookups/minute, 500/day, 15.5K/month. Premium tier: higher limits and access to additional endpoints (retrohunt, livehunt, intelligence)."
       },
       "headers": {
-        "User-Agent": "cyber-claude-agents/1.0",
+        "User-Agent": "cyber-agents/1.0",
         "Accept": "application/json"
       },
       "rateLimiting": {

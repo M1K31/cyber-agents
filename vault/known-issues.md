@@ -1,6 +1,6 @@
 # ⚠️ Known Issues & Limitations
 
-> Tracking known issues, limitations, and open questions for the cyber-claude-agents project.
+> Tracking known issues, limitations, and open questions for the cyber-agents project.
 
 ---
 

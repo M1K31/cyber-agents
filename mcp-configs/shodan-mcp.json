@@ -12,7 +12,7 @@
         "description": "Set the SHODAN_API_KEY environment variable with your Shodan API key. Free tier allows 1 query/second and limited results. Membership/Enterprise tiers unlock filters, bulk queries, and on-demand scanning."
       },
       "headers": {
-        "User-Agent": "cyber-claude-agents/1.0",
+        "User-Agent": "cyber-agents/1.0",
         "Accept": "application/json"
       },
       "rateLimiting": {

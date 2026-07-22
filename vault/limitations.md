@@ -1,6 +1,6 @@
 # ⚠️ Limitations
 
-> Known limitations, constraints, and boundaries of the cyber-claude-agents harness.
+> Known limitations, constraints, and boundaries of the cyber-agents harness.
 
 ---
 

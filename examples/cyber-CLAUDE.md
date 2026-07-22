@@ -1,14 +1,14 @@
 # CLAUDE.md — Cyber Claude Agents (Example Project Configuration)
 
-> **Copy this file to the root of any project where you want Claude Code to load the cybersecurity agent harness.** Adjust the paths to match your `cyber-claude-agents` installation directory.
+> **Copy this file to the root of any project where you want Claude Code to load the cybersecurity agent harness.** Adjust the paths to match your `cyber-agents` installation directory.
 
 ---
 
 ## Project Context
 
-This project is configured with the **cyber-claude-agents** security harness — a specialized Claude Code extension providing Red Team (offensive) and Blue Team (defensive) cybersecurity agents, skills, slash commands, hooks, and MCP server integrations. All operations are governed by enforceable rules and aligned with industry frameworks (MITRE ATT&CK, OWASP, NIST).
+This project is configured with the **cyber-agents** security harness — a specialized Claude Code extension providing Red Team (offensive) and Blue Team (defensive) cybersecurity agents, skills, slash commands, hooks, and MCP server integrations. All operations are governed by enforceable rules and aligned with industry frameworks (MITRE ATT&CK, OWASP, NIST).
 
-**Harness location**: `./cyber-claude-agents/` (adjust if installed elsewhere)
+**Harness location**: `./cyber-agents/` (adjust if installed elsewhere)
 
 ---
 
@@ -18,10 +18,10 @@ Load specialized sub-agents for specific security tasks. Each agent has its own 
 
 | Agent | File | Role | Team |
 |-------|------|------|------|
-| Red Team Lead | `cyber-claude-agents/agents/red-team-lead.md` | Campaign planning, MITRE ATT&CK mapping, kill-chain orchestration | 🔴 Offensive |
-| Exploit Researcher | `cyber-claude-agents/agents/exploit-researcher.md` | CVE analysis, PoC development, mitigation bypass | 🔴 Offensive |
-| Threat Hunter | `cyber-claude-agents/agents/threat-hunter.md` | Proactive log analysis, detection engineering (YARA/Sigma) | 🔵 Defensive |
-| Incident Responder | `cyber-claude-agents/agents/incident-responder.md` | PICERL methodology, containment, root cause analysis | 🔵 Defensive |
+| Red Team Lead | `cyber-agents/agents/red-team-lead.md` | Campaign planning, MITRE ATT&CK mapping, kill-chain orchestration | 🔴 Offensive |
+| Exploit Researcher | `cyber-agents/agents/exploit-researcher.md` | CVE analysis, PoC development, mitigation bypass | 🔴 Offensive |
+| Threat Hunter | `cyber-agents/agents/threat-hunter.md` | Proactive log analysis, detection engineering (YARA/Sigma) | 🔵 Defensive |
+| Incident Responder | `cyber-agents/agents/incident-responder.md` | PICERL methodology, containment, root cause analysis | 🔵 Defensive |
 
 ### Agent Delegation
 
@@ -40,10 +40,10 @@ Active incident confirmed   → Incident Responder
 
 Domain knowledge guides that agents reference for detailed procedures. Load the relevant skill when performing specialized work.
 
-- `cyber-claude-agents/skills/kali-linux-tooling.md` — Nmap, Metasploit, Burp Suite best practices
-- `cyber-claude-agents/skills/macos-tooling.md` — Homebrew security toolkit, macOS forensics
-- `cyber-claude-agents/skills/defense-evasion.md` — LOLBins, obfuscation, AV/EDR bypass + detection indicators
-- `cyber-claude-agents/skills/yara-rule-creation.md` — YARA rule syntax, performance, testing methodology
+- `cyber-agents/skills/kali-linux-tooling.md` — Nmap, Metasploit, Burp Suite best practices
+- `cyber-agents/skills/macos-tooling.md` — Homebrew security toolkit, macOS forensics
+- `cyber-agents/skills/defense-evasion.md` — LOLBins, obfuscation, AV/EDR bypass + detection indicators
+- `cyber-agents/skills/yara-rule-creation.md` — YARA rule syntax, performance, testing methodology
 
 ---
 
@@ -64,15 +64,15 @@ Slash commands for common security workflows. These define the full execution pi
 
 | Rule | File | What It Enforces |
 |------|------|-----------------|
-| OPSEC | `cyber-claude-agents/rules/opsec.md` | Proxychains/VPN usage, scan noise levels (1-4), OPSEC-safe payloads, credential encryption |
-| Safe Harbor (ROE) | `cyber-claude-agents/rules/safe-harbor.md` | Scope validation against authorized targets, hard/soft stops, engagement window, adjacent discovery protocol |
-| Data Handling | `cyber-claude-agents/rules/data-handling.md` | Auto-redaction of PII/credentials/keys (3-tier classification), proof-of-access patterns, retention lifecycle |
-| Reporting Standards | `cyber-claude-agents/rules/reporting-standards.md` | CVSS v3.1 scoring, ATT&CK mapping, mandatory templates for vulnerability/engagement/incident reports |
+| OPSEC | `cyber-agents/rules/opsec.md` | Proxychains/VPN usage, scan noise levels (1-4), OPSEC-safe payloads, credential encryption |
+| Safe Harbor (ROE) | `cyber-agents/rules/safe-harbor.md` | Scope validation against authorized targets, hard/soft stops, engagement window, adjacent discovery protocol |
+| Data Handling | `cyber-agents/rules/data-handling.md` | Auto-redaction of PII/credentials/keys (3-tier classification), proof-of-access patterns, retention lifecycle |
+| Reporting Standards | `cyber-agents/rules/reporting-standards.md` | CVSS v3.1 scoring, ATT&CK mapping, mandatory templates for vulnerability/engagement/incident reports |
 
 ### Core Principles
 
 1. **Authorization First** — Never execute offensive tools without confirmed written authorization
-2. **Scope Enforcement** — Hard stop on any target not in `cyber-claude-agents/scripts/authorized_scope.json`
+2. **Scope Enforcement** — Hard stop on any target not in `cyber-agents/scripts/authorized_scope.json`
 3. **Data Protection** — Auto-redact passwords, private keys, PII, and API tokens from all output
 4. **OPSEC Compliance** — Respect scan noise classification; use anonymization layers
 5. **Framework Alignment** — Map all findings to MITRE ATT&CK; compute CVSS v3.1 scores
@@ -86,8 +86,8 @@ Switch between operational modes using context injection. Each context overrides
 
 | Context | File | When to Use |
 |---------|------|------------|
-| Research | `cyber-claude-agents/contexts/research.md` | CVE analysis, YARA/Sigma development, advisory review — academic tone, passive only, mandatory citations |
-| Active Engagement | `cyber-claude-agents/contexts/active-engagement.md` | Live pentests, red team ops, active hunts, IR — tactical tone, command-first, phase-aware |
+| Research | `cyber-agents/contexts/research.md` | CVE analysis, YARA/Sigma development, advisory review — academic tone, passive only, mandatory citations |
+| Active Engagement | `cyber-agents/contexts/active-engagement.md` | Live pentests, red team ops, active hunts, IR — tactical tone, command-first, phase-aware |
 
 **Switching contexts:**
 ```
@@ -100,13 +100,13 @@ Operator: "Default mode"               → Unload context, return to standard be
 
 ## Hooks (Automation)
 
-Hooks fire automatically on Claude Code lifecycle events. Configured in `cyber-claude-agents/hooks/hooks.json`.
+Hooks fire automatically on Claude Code lifecycle events. Configured in `cyber-agents/hooks/hooks.json`.
 
 | Hook | Event | Script | Function |
 |------|-------|--------|----------|
-| Scope Check | PreToolUse (Bash) | `cyber-claude-agents/scripts/hooks/pre-command-scope-check.js` | Blocks out-of-scope offensive commands |
-| IOC Extractor | PostToolUse | `cyber-claude-agents/scripts/hooks/ioc-extractor.js` | Parses IPs, domains, hashes → `vault/iocs.csv` |
-| Session Sanitizer | Stop | `cyber-claude-agents/scripts/hooks/post-session-sanitize.js` | Redacts credentials from session context |
+| Scope Check | PreToolUse (Bash) | `cyber-agents/scripts/hooks/pre-command-scope-check.js` | Blocks out-of-scope offensive commands |
+| IOC Extractor | PostToolUse | `cyber-agents/scripts/hooks/ioc-extractor.js` | Parses IPs, domains, hashes → `vault/iocs.csv` |
+| Session Sanitizer | Stop | `cyber-agents/scripts/hooks/post-session-sanitize.js` | Redacts credentials from session context |
 
 ---
 
@@ -116,9 +116,9 @@ External security intelligence APIs accessible via MCP. Set the required environ
 
 | Server | Config | Tools | Required Env Var |
 |--------|--------|-------|-----------------|
-| Shodan | `cyber-claude-agents/mcp-configs/shodan-mcp.json` | 5 (host, search, DNS, exploits) | `SHODAN_API_KEY` |
-| VirusTotal | `cyber-claude-agents/mcp-configs/virustotal-mcp.json` | 6 (file, URL, domain, IP, behavior) | `VIRUSTOTAL_API_KEY` |
-| Splunk/SIEM | `cyber-claude-agents/mcp-configs/splunk-mcp.json` | 5 (search, async, results, notables) | `SPLUNK_BASE_URL`, `SPLUNK_AUTH_TOKEN` |
+| Shodan | `cyber-agents/mcp-configs/shodan-mcp.json` | 5 (host, search, DNS, exploits) | `SHODAN_API_KEY` |
+| VirusTotal | `cyber-agents/mcp-configs/virustotal-mcp.json` | 6 (file, URL, domain, IP, behavior) | `VIRUSTOTAL_API_KEY` |
+| Splunk/SIEM | `cyber-agents/mcp-configs/splunk-mcp.json` | 5 (search, async, results, notables) | `SPLUNK_BASE_URL`, `SPLUNK_AUTH_TOKEN` |
 
 ### Environment Setup
 
@@ -193,7 +193,7 @@ When displaying results in the terminal, follow these conventions:
 
 ## Vault (Project Documentation)
 
-All project documentation, IOC tracking, and audit logs live in `cyber-claude-agents/vault/`:
+All project documentation, IOC tracking, and audit logs live in `cyber-agents/vault/`:
 
 | File | Purpose | Updated By |
 |------|---------|-----------|

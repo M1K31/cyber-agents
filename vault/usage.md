@@ -1,6 +1,6 @@
 # 📖 Usage Guide
 
-> How to set up, configure, and use the cyber-claude-agents harness in your security workflows.
+> How to set up, configure, and use the cyber-agents harness in your security workflows.
 
 ---
 
@@ -45,7 +45,7 @@ The harness is globally installed into Claude Code. Skills, agents, and commands
 ### To re-install or update symlinks
 
 ```bash
-cd /Volumes/Locker2/GitHub/CybersecurityTeam/cyber-claude-agents
+cd /Volumes/Locker2/GitHub/CybersecurityTeam/cyber-agents
 
 BASE=$(pwd)
 for f in agents/*.md; do ln -sf "$BASE/$f" ~/.claude/agents/; done
@@ -115,7 +115,7 @@ honeypot:
 The daemon provides real-time threat data that the `/analyze`, `/status`, and `/triage` commands depend on:
 
 ```bash
-cd /Volumes/Locker2/GitHub/CybersecurityTeam/cyber-claude-agents
+cd /Volumes/Locker2/GitHub/CybersecurityTeam/cyber-agents
 python3 -m daemon.aegissiem_daemon
 ```
 
@@ -138,7 +138,7 @@ Verify: `curl http://localhost:11434/api/tags`
 
 ```bash
 echo '{"tool_name":"Bash","tool_input":{"command":"ls"}}' \
-  | node /Volumes/Locker2/GitHub/CybersecurityTeam/cyber-claude-agents/scripts/hooks/pre-command-scope-check.js
+  | node /Volumes/Locker2/GitHub/CybersecurityTeam/cyber-agents/scripts/hooks/pre-command-scope-check.js
 # Expected: {"decision":"allow"}
 ```
 
@@ -426,7 +426,7 @@ Address agents by name in any prompt. They are available globally in all Claude 
 
 | Issue | Cause | Fix |
 |-------|-------|-----|
-| `/analyze` returns no data | AegisSIEM daemon not running | `cd cyber-claude-agents && python3 -m daemon.aegissiem_daemon` |
+| `/analyze` returns no data | AegisSIEM daemon not running | `cd cyber-agents && python3 -m daemon.aegissiem_daemon` |
 | `/block` fails with SSH error | No SSH key or wrong router IP | Check `~/.aegissiem-daemon/config.yml` and `~/.ssh/router_rsa` |
 | Ollama analysis unavailable | Ollama not running or model missing | `ollama serve` then `ollama pull qwen2.5-coder` |
 | Scope check blocks legitimate targets | Target not in `authorized_targets` | Add IP/domain to `scripts/authorized_scope.json` |

@@ -1,6 +1,6 @@
 # 🎯 Capabilities
 
-> Complete inventory of what the cyber-claude-agents harness can do.
+> Complete inventory of what the cyber-agents harness can do.
 
 ---
 

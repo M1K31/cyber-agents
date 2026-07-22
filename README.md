@@ -9,7 +9,7 @@ Inspired by [everything-claude-code](https://github.com/affaan-m/everything-clau
 ## 📦 What's Inside
 
 ```
-cyber-claude-agents/
+cyber-agents/
 ├── agents/                        # Specialized subagents
 │   ├── red-team-lead.md           # Campaign planning & MITRE ATT&CK orchestration
 │   ├── exploit-researcher.md      # CVE analysis & PoC development
@@ -61,8 +61,8 @@ cyber-claude-agents/
 ### Step 1: Clone the Repository
 
 ```bash
-git clone https://github.com/your-org/cyber-claude-agents.git
-cd cyber-claude-agents
+git clone https://github.com/your-org/cyber-agents.git
+cd cyber-agents
 ```
 
 ### Step 2: Configure Claude Code

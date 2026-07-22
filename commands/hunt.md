@@ -184,7 +184,7 @@ status: experimental
 description: Detects potential PsExec-based lateral movement via new service installation
 references:
     - https://attack.mitre.org/techniques/T1021/002/
-author: cyber-claude-agents
+author: cyber-agents
 date: 2026/03/17
 tags:
     - attack.lateral_movement

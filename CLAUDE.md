@@ -90,7 +90,7 @@ The AegisSIEM daemon (`daemon/aegissiem_daemon.py`) runs continuously alongside 
 - **Dashboard API**: Serves web dashboard on port 8088
 - **Ecosystem integration**: Registers with appEcosystem, publishes security events
 
-Start: `python -m daemon.aegissiem_daemon` (from cyber-claude-agents/)
+Start: `python -m daemon.aegissiem_daemon` (from cyber-agents/)
 Config: `~/.aegissiem-daemon/config.yml`
 Database: `~/.aegissiem-daemon/aegissiem.db`
 Dashboard: `http://localhost:8088`

@@ -19,7 +19,7 @@ import shutil
 import sys
 from pathlib import Path
 
-# Source directory: the cyber-claude-agents root.
+# Source directory: the cyber-agents root.
 # Works for both editable installs (pip install -e .) and direct execution.
 HARNESS_ROOT = Path(__file__).parent.parent
 

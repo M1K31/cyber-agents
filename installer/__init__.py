@@ -1,1 +1,1 @@
-"""cyber-claude-harness installer."""
+"""cyber-agents installer."""
