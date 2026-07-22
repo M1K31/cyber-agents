@@ -21,6 +21,15 @@ REGISTRY_URL = os.environ.get("ECOSYSTEM_REGISTRY_URL", "http://localhost:8500")
 _PROFILE_TIMEOUT = 4.0
 
 
+# Capability verdict from the most recent routed call, surfaced to API callers
+# so a weak-model warning reaches the user rather than only the daemon log.
+_last_capability: dict = {"v": None}
+
+
+def last_capability() -> Optional[dict]:
+    return _last_capability.get("v")
+
+
 class AnalysisUnavailable(RuntimeError):
     """No configured provider could answer the request."""
 
@@ -81,7 +90,10 @@ async def analyze(prompt: str, context: Optional[str] = None) -> tuple[str, str,
 
     try:
         router = _build_router()
-        result = await router.chat([ChatMessage(role="user", content=prompt)], task="chat")
+        # task="security": this daemon IS the security-analysis backend, so the
+        # router applies security routing AND its model-capability check here.
+        result = await router.chat([ChatMessage(role="user", content=prompt)], task="security")
+        _last_capability["v"] = getattr(router, "last_capability", None)
     except Exception as e:
         # Never surface provider credentials or raw response bodies to the caller.
         logger.warning("LLM analysis failed: %s: %s", e.__class__.__name__, e)

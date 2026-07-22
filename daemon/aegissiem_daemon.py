@@ -267,13 +267,24 @@ def create_api(db: Database, pipeline: ResponsePipeline) -> web.Application:
                 status=500,
             )
 
-        return web.json_response({
+        # Surface the model-capability verdict. The local fallback can silently
+        # land on a model too small to be trusted for security findings, and the
+        # user never chose it — so it must travel with the answer, not sit in a
+        # log nobody reads.
+        from .llm_backend import last_capability
+
+        payload = {
             "status": "ok",
             "result": text,
             "model": model,
             "source": "harness",
             "provider": provider,
-        })
+        }
+        cap = last_capability()
+        if cap and cap.get("warning"):
+            payload["capability_warning"] = cap["warning"]
+            payload["capability_level"] = cap.get("level")
+        return web.json_response(payload)
 
     app.router.add_get("/api/status", get_status)
     app.router.add_get("/api/threats", get_threats)

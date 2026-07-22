@@ -38,7 +38,9 @@ async def test_analyze_routes_through_the_router(monkeypatch):
     assert (text, model, provider) == ("analysis-result", "phi3", "ollama")
     # One user message carrying the prompt.
     messages, task = fake.calls[0]
-    assert task == "chat"
+    # This daemon IS the security-analysis backend, so it routes as "security":
+    # that applies the user's security provider pin AND the model-capability check.
+    assert task == "security"
     assert len(messages) == 1
     assert messages[0].role == "user"
     assert messages[0].content == "threat prompt"
