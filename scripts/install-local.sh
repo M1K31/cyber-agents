@@ -10,10 +10,26 @@
 #   ./scripts/install-local.sh --plist    # also install + load the LaunchAgent
 set -euo pipefail
 
+# Distros disagree on which Python minor they ship, so honour the project
+# minimum (3.10) instead of one exact version: pinning python3.12 fails on
+# Debian bookworm (3.11), Ubuntu 22.04 (3.10), and anything newer.
+_resolve_python() {
+    local c
+    for c in python3.13 python3.12 python3.11 python3.10 python3; do
+        command -v "$c" >/dev/null 2>&1 || continue
+        "$c" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' 2>/dev/null \
+            && { echo "$c"; return 0; }
+    done
+    return 1
+}
+
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PREFIX="${CYBER_HARNESS_PREFIX:-$HOME/.local/share/cyber-harness}"
 VENV="$PREFIX/venv"
-PY="${PYTHON_BIN:-python3.12}"
+PY="${PYTHON_BIN:-$(_resolve_python || true)}"
+if [ -z "$PY" ] || ! command -v "$PY" >/dev/null 2>&1; then
+    echo "ERROR: no Python >= 3.10 found (set PYTHON_BIN to override)"; exit 1
+fi
 PORT="${CYBER_HARNESS_PORT:-8088}"
 LABEL="com.smartindustries.cyber-harness"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
