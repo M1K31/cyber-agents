@@ -62,13 +62,27 @@ fi
 [ -f "$REPO/daemon/requirements.txt" ] && "$VENV/bin/pip" install -r "$REPO/daemon/requirements.txt"
 "$VENV/bin/pip" install "$REPO"
 
-ECO_ROOT="${ECOSYSTEM_BASE_PATH:-$REPO/../..}/appEcosystem"
-if [ -d "$ECO_ROOT" ]; then
-    echo "==> Installing shared ecosystem packages from $ECO_ROOT"
-    "$VENV/bin/pip" install "$ECO_ROOT/auth/python" "$ECO_ROOT/packages/ecosystem-client" \
-                            "$ECO_ROOT/packages/ecosystem-ai"
-else
-    echo "!!  appEcosystem not found at $ECO_ROOT — provider routing unavailable" >&2
+# The shared ecosystem packages are ordinary dependencies in pyproject.toml, so
+# the `pip install "$REPO"` above already pulled them from PyPI. The harness is
+# an ecosystem component — it is registered in ecosystem.yaml as the preferred
+# security-analysis backend — so they are not optional. The previous block
+# printed a warning and continued when the sibling checkout was missing, which
+# left provider routing quietly unavailable.
+#
+# ECOSYSTEM_FROM_SOURCE=1 replaces them with EDITABLE installs from a local
+# checkout, for developing the packages themselves, and fails loudly when the
+# checkout is absent rather than leaving the PyPI copies silently in place.
+if [ -n "${ECOSYSTEM_FROM_SOURCE:-}" ]; then
+    ECO_ROOT="${ECOSYSTEM_BASE_PATH:-$REPO/../..}/appEcosystem"
+    if [ ! -d "$ECO_ROOT/auth/python" ]; then
+        echo "ERROR: ECOSYSTEM_FROM_SOURCE=1 but no appEcosystem checkout at $ECO_ROOT" >&2
+        exit 1
+    fi
+    echo "==> Overriding ecosystem packages with EDITABLE source installs from $ECO_ROOT"
+    "$VENV/bin/pip" install -e "$ECO_ROOT/auth/python" \
+                            -e "$ECO_ROOT/packages/ecosystem-client" \
+                            -e "$ECO_ROOT/packages/ecosystem-ai" \
+        || { echo "ERROR: editable ecosystem install failed" >&2; exit 1; }
 fi
 
 if $WRITE_PLIST; then

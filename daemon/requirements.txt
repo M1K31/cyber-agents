@@ -4,3 +4,10 @@ pydantic>=2.0
 pyyaml>=6.0
 watchdog>=3.0
 aiohttp>=3.9
+
+# appEcosystem integration — mirrors pyproject.toml, which is the source of
+# truth. Not optional: the harness is registered in ecosystem.yaml as the
+# preferred security-analysis backend.
+appecosystem-client>=0.3.1
+appecosystem-auth>=0.4.0
+appecosystem-ai>=0.1.0,<0.2
