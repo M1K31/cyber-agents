@@ -121,6 +121,17 @@ Use the red-team-lead agent to plan a penetration test for the 10.0.0.0/8 intern
 
 ---
 
+## 🤖 Autonomous SOC Daemon & Policy Gating (`daemon/`)
+
+`cyber-agents` includes an autonomous Python daemon (`daemon/aegissiem_daemon.py`) that bridges security log analysis, threat intelligence, and automated response actions across the **appEcosystem**:
+
+- **Fail-Closed Policy Gating (`ecosystem-policy`)**: All model-proposed mitigation and scan actions pass through the in-process `PolicyEngine`. Models generate structured proposals only; they cannot directly invoke system commands.
+- **Provisional Containment with TTL Rollback**: Threat containment actions (such as temporary router firewall blocks) apply immediately to defend the network, while scheduling an automated time-to-live rollback timer (default 24 hours). If an operator does not explicitly approve the permanent action, it reverts automatically.
+- **Step-Up TOTP Verification**: Privileged actions and permanent IP blocks require two-factor 6-digit TOTP verification from an authorized administrator.
+- **Hardware-Aware Local LLM Backend**: Integrates with local Ollama backends and queries hardware accelerators (Apple Metal / NVIDIA CUDA) with zero cloud fallback by default (`allow_cloud_fallback: false`).
+
+---
+
 ## 🔒 Rules & Guardrails
 
 | Rule | Purpose |
