@@ -70,11 +70,19 @@ def _build_router():
 def describe_backend() -> dict[str, Any]:
     """Non-secret description of the active backend. Safe to log or return."""
     prof = _load_profile_dict()
-    return {
+    desc = {
         "provider": prof.get("default_provider", "ollama"),
         "model": prof.get("selected_model", "auto"),
-        "allow_cloud_fallback": prof.get("allow_cloud_fallback", True),
+        "allow_cloud_fallback": prof.get("allow_cloud_fallback", False),
     }
+    try:
+        from ecosystem_compute import diagnose_gpu
+        diag = diagnose_gpu()
+        desc["accelerator"] = diag.hardware_accelerator
+        desc["status"] = diag.status
+    except Exception:
+        pass
+    return desc
 
 
 async def analyze(prompt: str, context: Optional[str] = None) -> tuple[str, str, str]:

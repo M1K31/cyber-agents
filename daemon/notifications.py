@@ -76,21 +76,26 @@ def send_imessage(recipient: str, message: str) -> bool:
         logger.warning("iMessage is only available on macOS")
         return False
 
-    # Sanitize message for AppleScript - escape backslashes and quotes
-    safe_message = message.replace("\\", "\\\\").replace('"', '\\"')
-    safe_recipient = recipient.replace("\\", "\\\\").replace('"', '\\"')
+    if not recipient:
+        return False
 
+    # Pass recipient and message via osascript argv (`on run argv`) so untrusted
+    # syslog/threat text can never inject AppleScript commands.
     script = (
-        f'tell application "Messages"\n'
-        f'  set targetService to 1st account whose service type = iMessage\n'
-        f'  set targetBuddy to participant "{safe_recipient}" of targetService\n'
-        f'  send "{safe_message}" to targetBuddy\n'
-        f'end tell'
+        "on run argv\n"
+        "  set targetRecipient to item 1 of argv\n"
+        "  set targetMessage to item 2 of argv\n"
+        '  tell application "Messages"\n'
+        "    set targetService to 1st account whose service type = iMessage\n"
+        "    set targetBuddy to participant targetRecipient of targetService\n"
+        "    send targetMessage to targetBuddy\n"
+        "  end tell\n"
+        "end run"
     )
 
     try:
         result = subprocess.run(
-            ["osascript", "-e", script],
+            ["osascript", "-e", script, str(recipient), str(message)],
             capture_output=True,
             text=True,
             timeout=15,
@@ -131,6 +136,14 @@ def notify(
     if imessage_recipient:
         if send_imessage(imessage_recipient, message):
             notified.append("imessage")
+
+    try:
+        from .ecosystem_bridge import publish_threat_notification_sync
+
+        if publish_threat_notification_sync(threat) is not None:
+            notified.append("ecosystem")
+    except Exception:
+        pass
 
     if not notified:
         logger.info("No notification channels configured or all failed")

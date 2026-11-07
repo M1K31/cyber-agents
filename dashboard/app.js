@@ -1,7 +1,7 @@
 // AegisSIEM Security Dashboard - Client Application
 // All dynamic content is sanitized via escapeHtml() before DOM insertion.
 
-const API_BASE = 'http://localhost:8088';
+const API_BASE = (typeof window !== 'undefined' && window.location && window.location.origin) ? window.location.origin : 'http://localhost:8088';
 const POLL_INTERVAL = 10000;
 
 let pollTimer = null;
@@ -119,9 +119,35 @@ async function apiGet(path) {
     return resp.json();
 }
 
-async function apiPost(path) {
-    var resp = await fetch(API_BASE + path, { method: 'POST' });
-    if (!resp.ok) throw new Error('POST ' + path + ': ' + resp.status);
+function currentTotpPayload(extra) {
+    var payload = Object.assign({}, extra || {});
+    var input = document.getElementById('totp-code');
+    if (input && input.value && input.value.trim()) {
+        payload.totp_code = input.value.trim();
+    }
+    return payload;
+}
+
+function clearTotpInput() {
+    var input = document.getElementById('totp-code');
+    if (input) input.value = '';
+}
+
+async function apiPost(path, body) {
+    var payload = body !== undefined ? body : currentTotpPayload();
+    var resp = await fetch(API_BASE + path, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+    });
+    if (!resp.ok) {
+        var detail = '';
+        try {
+            var errBody = await resp.json();
+            detail = errBody.detail || errBody.status || '';
+        } catch (_) {}
+        throw new Error('POST ' + path + ': ' + resp.status + (detail ? ' (' + detail + ')' : ''));
+    }
     return resp.json();
 }
 
@@ -332,6 +358,82 @@ async function actionDeny(id) {
     }
 }
 
+// ── Policy Bar & Step-Up Controls ──
+
+function initPolicyControls() {
+    var bar = document.getElementById('policy-bar');
+    var modal = document.getElementById('override-modal');
+    var btnSetup = document.getElementById('btn-setup-totp');
+
+    if (modal) {
+        modal.availableApps = ['aegissiem_daemon'];
+    }
+    if (bar && modal) {
+        bar.addEventListener('ecosystem-manage-restrictions', function() { modal.open(); });
+        bar.addEventListener('ecosystem-restore-restrictions', async function() {
+            try {
+                await apiPost('/api/policy/restrictions/on', {});
+                showToast('Conservative Restrictions: On restored');
+                refreshAll();
+            } catch (err) {
+                showToast('Restore failed: ' + err.message, 'error');
+            }
+        });
+        bar.addEventListener('ecosystem-freeze-request', async function() {
+            try {
+                await apiPost('/api/policy/freeze', {
+                    initiated_by: 'cyber-agents-dashboard',
+                    channel: 'dashboard',
+                    reason: 'Emergency Freeze triggered from AegisSIEM Daemon Dashboard'
+                });
+                showToast('Ecosystem Freeze engaged');
+                refreshAll();
+            } catch (err) {
+                showToast('Freeze failed: ' + err.message, 'error');
+            }
+        });
+        bar.addEventListener('ecosystem-resume-request', async function() {
+            try {
+                await apiPost('/api/policy/resume', currentTotpPayload({
+                    reason: 'Operator resumed from AegisSIEM Daemon Dashboard'
+                }));
+                clearTotpInput();
+                showToast('Normal policy operation resumed');
+                refreshAll();
+            } catch (err) {
+                showToast('Resume failed (enter 6-digit TOTP): ' + err.message, 'error');
+            }
+        });
+        modal.addEventListener('ecosystem-override-submit', async function(ev) {
+            var d = ev.detail || {};
+            try {
+                await apiPost('/api/policy/restrictions/off', {
+                    scope: d.scope,
+                    duration: d.duration,
+                    until_revoked: d.untilRevoked,
+                    reason: d.reason,
+                    totp_code: d.stepUpCredential
+                });
+                showToast('Signed scoped Restrictions: Off grant active');
+                refreshAll();
+            } catch (err) {
+                showToast('Override failed: ' + err.message, 'error');
+            }
+        });
+    }
+    if (btnSetup) {
+        btnSetup.addEventListener('click', async function() {
+            try {
+                var res = await apiPost('/api/auth/step-up/totp/enroll', currentTotpPayload({ operator_id: 'admin' }));
+                clearTotpInput();
+                showToast('TOTP 2FA Secret: ' + res.secret);
+            } catch (err) {
+                showToast('2FA setup: ' + err.message, 'error');
+            }
+        });
+    }
+}
+
 // ── Polling ──
 
 async function refreshAll() {
@@ -342,7 +444,8 @@ async function refreshAll() {
             apiGet('/api/blocked'),
             apiGet('/api/profiles'),
             apiGet('/api/honeypot/events'),
-            apiGet('/api/approvals')
+            apiGet('/api/approvals'),
+            apiGet('/api/policy/state')
         ]);
 
         setConnected(true);
@@ -353,6 +456,11 @@ async function refreshAll() {
         renderHoneypot(results[4]);
         renderApprovals(results[5]);
 
+        var bar = document.getElementById('policy-bar');
+        if (bar && results[6]) {
+            bar.policyState = results[6];
+        }
+
         document.getElementById('last-update').textContent = 'Last update: ' + new Date().toLocaleTimeString();
     } catch (err) {
         setConnected(false);
@@ -361,6 +469,7 @@ async function refreshAll() {
 }
 
 function startPolling() {
+    initPolicyControls();
     refreshAll();
     pollTimer = setInterval(refreshAll, POLL_INTERVAL);
 }
