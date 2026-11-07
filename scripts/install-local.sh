@@ -73,7 +73,7 @@ fi
 # checkout, for developing the packages themselves, and fails loudly when the
 # checkout is absent rather than leaving the PyPI copies silently in place.
 if [ -n "${ECOSYSTEM_FROM_SOURCE:-}" ]; then
-    ECO_ROOT="${ECOSYSTEM_BASE_PATH:-$REPO/../..}/appEcosystem"
+    ECO_ROOT="${ECOSYSTEM_BASE_PATH:-$REPO/..}/appEcosystem"
     if [ ! -d "$ECO_ROOT/auth/python" ]; then
         echo "ERROR: ECOSYSTEM_FROM_SOURCE=1 but no appEcosystem checkout at $ECO_ROOT" >&2
         exit 1
@@ -82,6 +82,10 @@ if [ -n "${ECOSYSTEM_FROM_SOURCE:-}" ]; then
     "$VENV/bin/pip" install -e "$ECO_ROOT/auth/python" \
                             -e "$ECO_ROOT/packages/ecosystem-client" \
                             -e "$ECO_ROOT/packages/ecosystem-ai" \
+                            -e "$ECO_ROOT/packages/ecosystem-hub" \
+                            -e "$ECO_ROOT/packages/ecosystem-policy" \
+                            -e "$ECO_ROOT/packages/ecosystem-compute" \
+                            -e "$ECO_ROOT/packages/ecosystem-voice" \
         || { echo "ERROR: editable ecosystem install failed" >&2; exit 1; }
 fi
 
