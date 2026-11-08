@@ -130,6 +130,11 @@ Use the red-team-lead agent to plan a penetration test for the 10.0.0.0/8 intern
 - **Step-Up TOTP Verification**: Privileged actions and permanent IP blocks require two-factor 6-digit TOTP verification from an authorized administrator.
 - **Hardware-Aware Local LLM Backend**: Integrates with local Ollama backends and queries hardware accelerators (Apple Metal / NVIDIA CUDA) with zero cloud fallback by default (`allow_cloud_fallback: false`).
 
+> **Installing and running the daemon:** unlike the Claude Code agent/skill
+> configurations, the daemon **is** executable Python. See [`usage.md`](usage.md)
+> for setup (`scripts/install-local.sh`), configuration (`~/.aegissiem-daemon/config.yml`),
+> and how to start it (it serves its dashboard on port 8088).
+
 ---
 
 ## 🔒 Rules & Guardrails
@@ -170,7 +175,7 @@ Use the red-team-lead agent to plan a penetration test for the 10.0.0.0/8 intern
 > **Legal & Ethical Use Only.** All tools, techniques, and procedures documented here are intended for **authorized security testing** and **defensive operations only**. Unauthorized access to computer systems is illegal. Always obtain proper written authorization before conducting any offensive security testing.
 
 > [!NOTE]
-> This project is designed for use with Claude Code's agent delegation system. Agents, skills, and commands are Markdown-based configurations — there is no executable code to install.
+> This project's **Claude Code harness** — agents, skills, and commands — is made of Markdown-based configurations with no executable code to install. The **autonomous SOC daemon** (`daemon/`) is separate and *is* executable Python; see [`usage.md`](usage.md) to install and run it.
 
 ---
 

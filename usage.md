@@ -79,37 +79,48 @@ In Claude Code, invoke cybersecurity workflows using slash commands or direct de
 ### Example 1: Autonomous Triage of AegisSIEM Syslog Events
 `cyber-agents` tails router syslogs ingested by `AegisSIEM` or listens for canonical `security.threat` events over the ecosystem mesh:
 
+This example shows the **policy decision** only: `engine.decide()` returns a
+verdict; it does not itself block anything. Your code acts on the result (the
+`allow` branch is where you would apply the block and schedule rollback).
+
 ```python
+import asyncio
+
 from daemon.ecosystem_bridge import get_policy_engine, get_approval_queue
 from ecosystem_policy import ActionRequest
 
-# 1. Ingest threat detected by AegisSIEM
-threat = {
-    "source_ip": "45.227.253.13",
-    "threat_type": "brute_force",
-    "severity": "HIGH",
-    "attempts": 25392
-}
 
-# 2. Check proposed containment against ecosystem policy
-engine = get_policy_engine()
-action = ActionRequest(
-    actor="cyber-agents/triage-daemon",
-    model="security_analysis:local-llama3",
-    action="block_ip",
-    action_class="contain",
-    target={"ip": threat["source_ip"]},
-    rationale="Repeated brute force exceeding 25,000 attempts."
-)
+async def triage_threat():
+    # 1. Ingest threat detected by AegisSIEM
+    threat = {
+        "source_ip": "45.227.253.13",
+        "threat_type": "brute_force",
+        "severity": "HIGH",
+        "attempts": 25392,
+    }
 
-decision = engine.decide(action)
-if decision.result in ("allow", "allow_and_notify"):
-    # Apply temporary block and schedule automated rollback
-    print(f"Action allowed: {decision.notice}")
-elif decision.result == "require_approval":
-    # Submit to approvals queue; surfaces in AegisSIEM and Control Plane UIs
-    queue = get_approval_queue()
-    await queue.enqueue(action, deadline=decision.deadline)
+    # 2. Check the proposed containment against ecosystem policy
+    engine = get_policy_engine()
+    action = ActionRequest(
+        actor="cyber-agents/triage-daemon",
+        model="security_analysis:local-llama3",
+        action="block_ip",
+        action_class="contain",
+        target={"ip": threat["source_ip"]},
+        rationale="Repeated brute force exceeding 25,000 attempts.",
+    )
+
+    decision = engine.decide(action)
+    if decision.result in ("allow", "allow_and_notify"):
+        # Apply your temporary block and schedule automated rollback here.
+        print(f"Action allowed: {decision.notice}")
+    elif decision.result == "require_approval":
+        # Submit to the approvals queue; surfaces in AegisSIEM and Control Plane UIs.
+        queue = get_approval_queue()
+        await queue.enqueue(action, deadline=decision.deadline)
+
+
+asyncio.run(triage_threat())
 ```
 
 ---
@@ -137,21 +148,28 @@ async def lookup_mitre_guidance(technique_id: str):
 If an internal endpoint is suspected of compromise, `cyber-agents` requests an authorized scan via the central `ScanRunner`:
 
 ```python
+import asyncio
+
 import httpx
 from ecosystem_auth.tokens import sign_request, get_ecosystem_secret
 
-secret = get_ecosystem_secret()
-url = "http://127.0.0.1:8500/scans/run"
-payload = {
-    "device_id": "example-workstation",
-    "profile": "standard",
-    "reason": "Correlated lateral movement alert"
-}
 
-headers = sign_request("POST", url, secret, payload)
-async with httpx.AsyncClient() as client:
-    res = await client.post(url, json=payload, headers=headers)
-    scan_job = res.json()
-    print(f"Enqueued forensic audit: {scan_job['scan_id']}")
+async def request_scan():
+    secret = get_ecosystem_secret()
+    url = "http://127.0.0.1:8500/scans/run"
+    payload = {
+        "device_id": "example-workstation",
+        "profile": "standard",
+        "reason": "Correlated lateral movement alert",
+    }
+
+    headers = sign_request("POST", url, secret, payload)
+    async with httpx.AsyncClient() as client:
+        res = await client.post(url, json=payload, headers=headers)
+        scan_job = res.json()
+        print(f"Enqueued forensic audit: {scan_job['scan_id']}")
+
+
+asyncio.run(request_scan())
 ```
 
