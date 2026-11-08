@@ -592,6 +592,32 @@ def create_api(db: Database, pipeline: ResponsePipeline, *, step_up_auth: Any = 
             return web.json_response({"detail": "Invalid or replayed TOTP code"}, status=401)
         return web.json_response(issued)
 
+    async def post_ecosystem_event(request: web.Request) -> web.Response:
+        """Receive mesh events from the ecosystem hub.
+
+        Previously the hub posted here (e.g. to propagate an emergency Freeze) but
+        the daemon had no route, so the hub marked it unreachable and the response
+        pipeline stayed unfrozen. Accept hub-signed peers or loopback, and apply a
+        mesh Freeze. Resume is intentionally NOT auto-applied — leaving Freeze
+        requires operator step-up via /api/policy/resume.
+        """
+        body = await _read_json_optional(request)
+        if not _is_loopback_request(request) and not _verify_hmac_peer(request, body):
+            return web.json_response({"detail": "Authentication required for mesh events"}, status=401)
+        etype = str(body.get("type") or body.get("event_type") or "")
+        data = body.get("data") if isinstance(body.get("data"), dict) else body
+        if etype in ("policy.freeze", "ecosystem.freeze", "containment.freeze"):
+            policy_engine.freeze(
+                initiated_by=str(data.get("initiated_by") or "ecosystem-hub"),
+                channel="ecosystem_mesh",
+                reason=str(data.get("reason") or "Mesh Freeze propagated from the ecosystem hub"),
+                acknowledged_devices=["aegissiem_daemon"],
+            )
+            logger.warning("Applied mesh Freeze from hub event '%s'", etype)
+            return web.json_response({"status": "frozen"})
+        logger.debug("Ignoring non-actionable mesh event '%s'", etype)
+        return web.json_response({"status": "ok"})
+
     async def serve_ui_asset(request: web.Request) -> web.StreamResponse:
         name = request.match_info["name"]
         asset = resolve_ui_asset_path(name)
@@ -702,6 +728,7 @@ def create_api(db: Database, pipeline: ResponsePipeline, *, step_up_auth: Any = 
     app.router.add_post("/api/policy/restrictions/on", post_policy_restrictions_on)
     app.router.add_post("/api/auth/step-up/totp/enroll", post_totp_enroll)
     app.router.add_post("/api/auth/step-up/totp/verify", post_totp_verify)
+    app.router.add_post("/ecosystem/events", post_ecosystem_event)
     app.router.add_get("/ui/{name}", serve_ui_asset)
     app.router.add_get("/ui/fonts/{name}", serve_ui_font)
     dash_dir = Path(__file__).resolve().parent.parent / "dashboard"
