@@ -103,6 +103,13 @@ def reset_policy_singletons() -> None:
 
 def resolve_ui_asset_path(filename: str) -> Path | None:
     """Resolve shared `@appecosystem/ui-controls` bundle or Apple HIG theme CSS."""
+    # Fonts are the only variable-named assets; confine them to a flat basename so
+    # an encoded-traversal request (fonts/../../etc/passwd) cannot escape the theme
+    # directory. The .js/.css names are matched exactly below and need no guard.
+    if filename.startswith("fonts/"):
+        font_name = filename[len("fonts/"):]
+        if not font_name or "/" in font_name or "\\" in font_name or ".." in font_name:
+            return None
     root = _find_ecosystem_root()
     candidates: list[Path] = []
     if root is not None:

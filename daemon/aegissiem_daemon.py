@@ -15,6 +15,7 @@ Async event loop that:
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 import logging
 import os
@@ -418,6 +419,15 @@ def create_api(db: Database, pipeline: ResponsePipeline, *, step_up_auth: Any = 
                 if b.id == int(raw_id):
                     target_ip = b.ip
                     break
+        # Never pass an unvalidated path segment to the router SSH unblock: a
+        # value with shell metacharacters would execute on the router's account.
+        # Only a well-formed IP address is ever forwarded.
+        try:
+            target_ip = str(ipaddress.ip_address(target_ip))
+        except ValueError:
+            return web.json_response(
+                {"status": "error", "detail": "Invalid IP address"}, status=400
+            )
         await pipeline.unblock(target_ip)
         return web.json_response({"status": "unblocked", "ip": target_ip})
 
