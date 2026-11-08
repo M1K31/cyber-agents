@@ -310,9 +310,22 @@ def create_api(db: Database, pipeline: ResponsePipeline, *, step_up_auth: Any = 
                 status=401,
             )
         threat_id = int(request.match_info["id"])
-        success = await pipeline.block_threat(threat_id)
-        if success:
+        result = await pipeline.block_threat(threat_id)
+        if result == "blocked":
             return web.json_response({"status": "blocked", "threat_id": threat_id})
+        if result == "pending_approval":
+            # Not a failure: the block is held for operator approval. 202 so the
+            # dashboard shows "pending" rather than reporting an error and retrying.
+            return web.json_response(
+                {"status": "pending_approval", "threat_id": threat_id,
+                 "detail": "Block requires operator approval; a checkpoint was created"},
+                status=202,
+            )
+        if result == "denied":
+            return web.json_response(
+                {"status": "denied", "threat_id": threat_id, "detail": "Blocked by PolicyEngine"},
+                status=403,
+            )
         if policy_engine.export_state().get("frozen"):
             return web.json_response(
                 {"status": "frozen", "detail": "Ecosystem Freeze is active; mutating blocks are suspended"},
@@ -550,11 +563,22 @@ def create_api(db: Database, pipeline: ResponsePipeline, *, step_up_auth: Any = 
         body = await _read_json_optional(request)
         operator_id = str(body.get("operator_id") or "admin").strip()
         existing = step_up.has_enrolled_factors(operator_id)
+        admin_bootstrapped = any(step_up.has_enrolled_factors("admin").values())
         if existing.get("totp"):
             if _authenticate_privileged(request, body) is None:
                 return web.json_response(
                     {"detail": "TOTP already enrolled; provide current TOTP code to rotate"},
                     status=401,
+                )
+        elif admin_bootstrapped and operator_id != "admin":
+            # The system is already bootstrapped (the admin operator is enrolled).
+            # Creating an ADDITIONAL operator must be authorized by an existing
+            # operator's step-up, not merely by loopback access — otherwise an
+            # unprivileged local caller could mint a fresh policy_admin identity.
+            if _authenticate_privileged(request, body) is None:
+                return web.json_response(
+                    {"detail": "Enrolling an additional operator requires current step-up authorization"},
+                    status=403,
                 )
         enrolled = step_up.enroll_totp(operator_id, issuer="AegisSIEM-Daemon")
         return web.json_response(enrolled)

@@ -366,15 +366,17 @@ class ResponsePipeline:
                 except Exception as e:
                     logger.warning("Recon failed for %s: %s", threat.source_ip, e)
 
-    async def block_threat(self, threat_id: int) -> bool:
+    async def block_threat(self, threat_id: int) -> str:
         """Block the source IP of a threat on the router, gated by PolicyEngine.
 
-        Returns True if blocking was permitted and successful.
+        Returns one of: "blocked" (applied), "pending_approval" (checkpoint created,
+        awaiting operator step-up), "denied" (policy denied), or "failed" (not found
+        or the router rejected the block).
         """
         threat = self.db.get_threat(threat_id)
         if not threat or not threat.source_ip:
             logger.warning("Cannot block threat #%d: not found or no source IP", threat_id)
-            return False
+            return "failed"
 
         decision = self._decide(
             action="block_ip",
@@ -388,17 +390,25 @@ class ResponsePipeline:
         )
         if decision.result == "deny":
             logger.warning("Block of threat #%d (%s) denied by PolicyEngine: %s", threat_id, threat.source_ip, decision.reason)
-            return False
+            return "denied"
         if decision.result == "require_approval":
-            profile = self.db.get_profile_by_ip(threat.source_ip)
-            self.approval_manager.create_checkpoint(
-                profile_id=profile.id if profile and profile.id else 0,
-                action="block_ip",
-                summary=f"Approve blocking {threat.source_ip} for threat #{threat_id} ({threat.threat_type})?",
-                action_class="contain",
-                target={"blocked_ip": threat.source_ip, "threat_id": threat_id},
+            # Dedupe: the auto-block loop retries an open threat every 60s, so only
+            # create a checkpoint if this threat has no pending block_ip approval.
+            marker = f"threat #{threat_id}"
+            already_pending = any(
+                a.action == "block_ip" and marker in (a.summary or "")
+                for a in self.db.get_pending_approvals()
             )
-            return False
+            if not already_pending:
+                profile = self.db.get_profile_by_ip(threat.source_ip)
+                self.approval_manager.create_checkpoint(
+                    profile_id=profile.id if profile and profile.id else 0,
+                    action="block_ip",
+                    summary=f"Approve blocking {threat.source_ip} for threat #{threat_id} ({threat.threat_type})?",
+                    action_class="contain",
+                    target={"blocked_ip": threat.source_ip, "threat_id": threat_id},
+                )
+            return "pending_approval"
 
         if not self.router_host:
             logger.warning("No router configured for blocking")
@@ -442,7 +452,7 @@ class ResponsePipeline:
                 ttl_seconds=decision.ttl_seconds or 86400,
             )
 
-        return success
+        return "blocked" if success else "failed"
 
     async def unblock(self, ip: str) -> bool:
         """Unblock an IP address."""
