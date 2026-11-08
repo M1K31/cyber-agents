@@ -299,6 +299,26 @@ class ResponsePipeline:
                     )
                     if hp_decision.result in ("allow", "allow_and_notify"):
                         await self.honeypot.deploy_for_level(level)
+                        # Provisional containment: when the policy allowed this only
+                        # under an async-approval lease, record a checkpoint with the
+                        # TTL/revert plan so it is reviewed and can expire, rather than
+                        # deploying listeners that linger unapproved.
+                        if getattr(hp_decision, "async_approval", False):
+                            self.approval_manager.create_checkpoint(
+                                profile_id=profile.id if profile and profile.id else 0,
+                                action="confirm_provisional_honeypot",
+                                summary=(
+                                    f"Provisional honeypot deployment active for level "
+                                    f"{getattr(level, 'value', level)} ({threat.source_ip}). "
+                                    f"Deny or allow TTL expiry to tear it down."
+                                ),
+                                action_class="contain",
+                                target={"local_service": "honeypot", "level": getattr(level, "value", str(level)), "source_ip": threat.source_ip},
+                                async_containment=True,
+                                on_deny=hp_decision.on_deny or "revert",
+                                revert_plan={"teardown_honeypot": True, "level": getattr(level, "value", str(level))},
+                                ttl_seconds=hp_decision.ttl_seconds or 86400,
+                            )
                     else:
                         logger.info("Honeypot deployment held by PolicyEngine (%s): %s", hp_decision.result, hp_decision.reason)
 

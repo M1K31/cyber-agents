@@ -179,7 +179,20 @@ def _is_loopback_request(request: web.Request) -> bool:
     if request.headers.get("X-Forwarded-For"):
         return False
     remote = str(request.remote or "").strip()
-    return remote in ("127.0.0.1", "::1", "localhost", "")
+    if remote not in ("127.0.0.1", "::1", "localhost", ""):
+        return False
+    # Anti-DNS-rebinding: a rebound page still connects to loopback but sends the
+    # attacker's own domain as Host. Require the Host header to name loopback, so
+    # a rebinding page cannot reach the loopback-only bootstrap/Freeze routes.
+    host = (request.headers.get("Host") or "").strip().lower()
+    if host:
+        if host.startswith("["):
+            hostname = host[1:].split("]", 1)[0]
+        else:
+            hostname = host.rsplit(":", 1)[0]
+        if hostname not in ("127.0.0.1", "::1", "localhost"):
+            return False
+    return True
 
 
 async def _read_json_optional(request: web.Request) -> dict[str, Any]:
@@ -240,8 +253,10 @@ def create_api(db: Database, pipeline: ResponsePipeline, *, step_up_auth: Any = 
     ) -> tuple[str, str, str | None] | None:
         """Verify either HMAC peer signature OR operator step-up (TOTP / Passkey / Device-Key)."""
         if _verify_hmac_peer(request, body):
-            key_id = request.headers.get("X-Ecosystem-Key-Id") or "ecosystem-peer"
-            return (key_id, "device_key", None)
+            # The signature proves possession of the shared ecosystem secret, not a
+            # specific peer, so attribute to a fixed trusted-peer principal rather
+            # than the spoofable client-supplied X-Ecosystem-Key-Id header.
+            return ("ecosystem-peer", "device_key", None)
 
         token = (
             str(body.get("step_up_token") or request.headers.get("X-Ecosystem-Step-Up") or "").strip()
@@ -480,6 +495,26 @@ def create_api(db: Database, pipeline: ResponsePipeline, *, step_up_auth: Any = 
             )
         operator_id, auth_method, _ = auth_info
         scope = body.get("scope") if isinstance(body.get("scope"), dict) else {}
+
+        def _scope_list(key: str, default: list[str]) -> list[str] | None:
+            # A scope field must be a JSON array. A bare string would otherwise be
+            # list()-expanded into individual characters, silently producing a
+            # grant scoped to one-letter app/device names.
+            val = scope.get(key)
+            if val is None:
+                return default
+            if not isinstance(val, list) or not all(isinstance(x, str) for x in val):
+                return None
+            return val
+
+        apps = _scope_list("apps", ["aegissiem_daemon"])
+        devices = _scope_list("devices", ["local"])
+        action_classes = _scope_list("action_classes", ["investigate", "contain"])
+        if apps is None or devices is None or action_classes is None:
+            return web.json_response(
+                {"detail": "scope.apps / scope.devices / scope.action_classes must be arrays of strings"},
+                status=400,
+            )
         dur_sec, until_rev = _duration_to_seconds(
             "until_revoked" if body.get("until_revoked") else body.get("duration", "30m")
         )
@@ -488,9 +523,9 @@ def create_api(db: Database, pipeline: ResponsePipeline, *, step_up_auth: Any = 
                 issued_by=operator_id,
                 auth_method=auth_method,
                 reason=str(body.get("reason") or ""),
-                apps=list(scope.get("apps") or ["aegissiem_daemon"]),
-                devices=list(scope.get("devices") or ["local"]),
-                action_classes=list(scope.get("action_classes") or ["investigate", "contain"]),
+                apps=apps,
+                devices=devices,
+                action_classes=action_classes,
                 duration_seconds=dur_sec,
                 until_revoked=until_rev,
                 applied_devices=["aegissiem_daemon"],
