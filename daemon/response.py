@@ -201,6 +201,10 @@ class ResponsePipeline:
     ):
         self.db = db
         self.honeypot = honeypot_manager
+        # Monotonic honeypot-deployment lease: a revert only tears down the
+        # deployment it owns, so an expiring old lease cannot stop a newer one.
+        self._honeypot_lease = 0
+        self._active_honeypot_lease = None
         self.router_host = router_host
         self.router_user = router_user
         self.router_key = router_key
@@ -234,14 +238,25 @@ class ResponsePipeline:
         # Honeypot provisional teardown: tear the listeners back down so a
         # denied/expired lease is a real revert, not a silent no-op.
         if plan.get("teardown_honeypot"):
-            logger.info("Reverting provisional honeypot deployment (level=%s)", plan.get("level"))
-            if self.honeypot is not None:
-                try:
-                    loop = asyncio.get_running_loop()
-                    if loop.is_running():
-                        loop.create_task(self.honeypot.stop_all())
-                except RuntimeError:
-                    pass
+            lease_id = plan.get("lease_id")
+            if lease_id is not None and lease_id != self._active_honeypot_lease:
+                logger.warning(
+                    "Skipping honeypot teardown for stale lease %s (active lease=%s); a newer deployment is live",
+                    lease_id, self._active_honeypot_lease,
+                )
+                return
+            logger.info("Reverting provisional honeypot deployment (level=%s, lease=%s)", plan.get("level"), lease_id)
+            if self.honeypot is None:
+                logger.warning("Honeypot teardown requested but no honeypot manager is configured")
+                return
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                logger.warning("Could not schedule honeypot teardown: no running event loop")
+                return
+            if loop.is_running():
+                loop.create_task(self.honeypot.stop_all())
+                self._active_honeypot_lease = None
             return
         ip = plan.get("unblock_ip") or (record.get("target") or {}).get("blocked_ip")
         threat_id = plan.get("threat_id") or (record.get("target") or {}).get("threat_id")
@@ -316,6 +331,9 @@ class ResponsePipeline:
                         # TTL/revert plan so it is reviewed and can expire, rather than
                         # deploying listeners that linger unapproved.
                         if getattr(hp_decision, "async_approval", False):
+                            self._honeypot_lease += 1
+                            lease_id = self._honeypot_lease
+                            self._active_honeypot_lease = lease_id
                             self.approval_manager.create_checkpoint(
                                 profile_id=profile.id if profile and profile.id else 0,
                                 action="confirm_provisional_honeypot",
@@ -328,7 +346,7 @@ class ResponsePipeline:
                                 target={"local_service": "honeypot", "level": getattr(level, "value", str(level)), "source_ip": threat.source_ip},
                                 async_containment=True,
                                 on_deny=hp_decision.on_deny or "revert",
-                                revert_plan={"teardown_honeypot": True, "level": getattr(level, "value", str(level))},
+                                revert_plan={"teardown_honeypot": True, "level": getattr(level, "value", str(level)), "lease_id": lease_id},
                                 ttl_seconds=hp_decision.ttl_seconds or 86400,
                             )
                     else:
