@@ -338,9 +338,17 @@ async function actionUnblock(id) {
     }
 }
 
+function _clearTotpInput() {
+    // A TOTP code is single-use; clear it after it is consumed so a second
+    // approval/deny does not resubmit a now-invalid code and fail authentication.
+    var totpInput = document.getElementById('totp-code');
+    if (totpInput) totpInput.value = '';
+}
+
 async function actionApprove(id) {
     try {
         await apiPost('/api/approvals/' + id + '/approve');
+        _clearTotpInput();
         showToast('Approval granted');
         refreshAll();
     } catch (err) {
@@ -351,6 +359,7 @@ async function actionApprove(id) {
 async function actionDeny(id) {
     try {
         await apiPost('/api/approvals/' + id + '/deny');
+        _clearTotpInput();
         showToast('Action denied');
         refreshAll();
     } catch (err) {

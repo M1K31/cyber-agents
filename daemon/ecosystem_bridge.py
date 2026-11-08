@@ -178,7 +178,10 @@ def threat_dedupe_key(threat: Any) -> str:
     hour_bucket = ts.strftime("%Y%m%d%H") if hasattr(ts, "strftime") else str(ts)[:13]
     source_ip = getattr(threat, "source_ip", None) or "unknown"
     threat_type = getattr(threat, "threat_type", None) or "unknown"
-    return f"aegissiem:{threat_type}:{source_ip}:{hour_bucket}"
+    # Include severity so an escalation (e.g. a CRITICAL threat following a LOW one
+    # with the same type/source/hour) is NOT suppressed as a duplicate.
+    severity = _threat_severity_str(threat)
+    return f"aegissiem:{threat_type}:{source_ip}:{severity}:{hour_bucket}"
 
 
 def _threat_severity_str(threat: Any) -> str:
