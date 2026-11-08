@@ -65,7 +65,8 @@ def test_daemon_hub_offline_deduplication(monkeypatch, tmp_path):
         severity=SimpleNamespace(value="high"),
         timestamp=datetime(2026, 11, 1, 20, 15, 0),
     )
-    assert threat_dedupe_key(threat) == "aegissiem:ssh_bruteforce:203.0.113.42:2026110120"
+    # Dedupe key now includes severity so an escalation is not suppressed.
+    assert threat_dedupe_key(threat) == "aegissiem:ssh_bruteforce:203.0.113.42:high:2026110120"
 
     async def _run():
         hub = HubRuntime(
