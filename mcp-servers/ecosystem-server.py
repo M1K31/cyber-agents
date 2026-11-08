@@ -47,6 +47,11 @@ def handle_tool_call(name, arguments):
                 "data": data,
             }
             headers = _signed_headers("POST", url, payload)
+            if not headers:
+                # Signing failed (e.g. ECOSYSTEM_SECRET missing). Surface the local
+                # configuration error instead of silently sending an unsigned request
+                # the registry would reject anyway.
+                return {"success": False, "error": "Request signing failed (missing ecosystem secret?); not sending unsigned"}
             with httpx.Client(timeout=10) as client:
                 resp = client.post(url, json=payload, headers=headers)
                 return {"success": resp.status_code == 200, "status_code": resp.status_code}

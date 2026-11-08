@@ -490,10 +490,15 @@ def create_api(db: Database, pipeline: ResponsePipeline, *, step_up_auth: Any = 
         # Allow loopback, an HMAC peer, OR an authenticated operator step-up so a
         # remote operator with a valid TOTP/passkey can Freeze (previously remote
         # operators got 401 even with a valid factor).
-        if not _is_loopback_request(request) and _authenticate_privileged(request, body) is None:
+        auth_info = _authenticate_privileged(request, body)
+        if not _is_loopback_request(request) and auth_info is None:
             return web.json_response({"detail": "Authentication required for remote Freeze"}, status=401)
+        # Attribute the audit record to the authenticated identity, never a
+        # client-supplied initiated_by (which would let a caller spoof attribution).
+        # Only an unauthenticated loopback caller falls back to a fixed label.
+        initiated_by = auth_info[0] if auth_info is not None else "loopback-operator"
         state = policy_engine.freeze(
-            initiated_by=str(body.get("initiated_by") or "cyber-agents-operator"),
+            initiated_by=initiated_by,
             channel=str(body.get("channel") or "dashboard"),
             reason=str(body.get("reason") or "Emergency Freeze triggered from AegisSIEM Daemon"),
             acknowledged_devices=["aegissiem_daemon"],
