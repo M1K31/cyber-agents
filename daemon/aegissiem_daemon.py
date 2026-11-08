@@ -213,10 +213,14 @@ def _is_cross_site_browser(request: web.Request) -> bool:
     if origin:
         from urllib.parse import urlparse
         try:
-            host = (urlparse(origin).hostname or "").lower()
+            netloc = (urlparse(origin).netloc or "").lower()
         except Exception:
             return True
-        return host not in ("127.0.0.1", "::1", "localhost")
+        # Same-origin only when the Origin's full host:port equals our own Host
+        # header. Matching on hostname alone would let another loopback *port*
+        # (a different local app the attacker controls) pass as same-site.
+        host_header = (request.headers.get("Host") or "").strip().lower()
+        return not (netloc and host_header and netloc == host_header)
     return False
 
 
