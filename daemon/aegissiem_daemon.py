@@ -195,6 +195,17 @@ def _is_loopback_request(request: web.Request) -> bool:
     return True
 
 
+def _is_cross_site_browser(request: web.Request) -> bool:
+    """True when a browser marks this as a cross-site request (CSRF).
+
+    Modern browsers send `Sec-Fetch-Site: cross-site|same-site` on forged cross-
+    origin requests and `same-origin`/`none` for first-party ones. Non-browser
+    callers (the HMAC peer, curl) send no such header, so this never blocks them.
+    """
+    site = request.headers.get("Sec-Fetch-Site")
+    return bool(site) and site not in ("same-origin", "none")
+
+
 async def _read_json_optional(request: web.Request) -> dict[str, Any]:
     if not request.can_read_body:
         return {}
@@ -472,7 +483,14 @@ def create_api(db: Database, pipeline: ResponsePipeline, *, step_up_auth: Any = 
 
     async def post_policy_freeze(request: web.Request) -> web.Response:
         body = await _read_json_optional(request)
-        if not _is_loopback_request(request) and not _verify_hmac_peer(request, body):
+        # Reject cross-site browser requests so a malicious page cannot trigger a
+        # Freeze (DoS) via a simple cross-origin POST to the loopback endpoint.
+        if _is_cross_site_browser(request):
+            return web.json_response({"detail": "Cross-site request rejected"}, status=403)
+        # Allow loopback, an HMAC peer, OR an authenticated operator step-up so a
+        # remote operator with a valid TOTP/passkey can Freeze (previously remote
+        # operators got 401 even with a valid factor).
+        if not _is_loopback_request(request) and _authenticate_privileged(request, body) is None:
             return web.json_response({"detail": "Authentication required for remote Freeze"}, status=401)
         state = policy_engine.freeze(
             initiated_by=str(body.get("initiated_by") or "cyber-agents-operator"),
@@ -549,6 +567,8 @@ def create_api(db: Database, pipeline: ResponsePipeline, *, step_up_auth: Any = 
 
     async def post_policy_restrictions_on(request: web.Request) -> web.Response:
         body = await _read_json_optional(request)
+        if _is_cross_site_browser(request):
+            return web.json_response({"detail": "Cross-site request rejected"}, status=403)
         if not _is_loopback_request(request) and _authenticate_privileged(request, body) is None:
             return web.json_response({"detail": "Authentication required"}, status=401)
         state = policy_engine.restore_restrictions_on(
@@ -563,14 +583,17 @@ def create_api(db: Database, pipeline: ResponsePipeline, *, step_up_auth: Any = 
         body = await _read_json_optional(request)
         operator_id = str(body.get("operator_id") or "admin").strip()
         existing = step_up.has_enrolled_factors(operator_id)
-        admin_factors = step_up.has_enrolled_factors("admin")
-        # Only the very first factor on a fresh store is loopback-only bootstrap
-        # (approximated by the canonical "admin" operator having no factors yet —
-        # the StepUpAuthenticator exposes no "any operator enrolled" query). Once
-        # bootstrapped, EVERY enrollment requires current step-up, not merely
+        # Only the very first factor on a fresh store is loopback-only bootstrap.
+        # Once bootstrapped, EVERY enrollment requires current step-up, not merely
         # loopback: rotating any operator, enrolling a new operator, or adding a
         # TOTP factor to an operator that already holds a passkey/device key.
-        first_boot = operator_id == "admin" and not any(admin_factors.values())
+        _any_enrolled = getattr(step_up, "has_any_enrolled_operator", None)
+        if callable(_any_enrolled):
+            first_boot = not _any_enrolled()
+        else:
+            # Fallback for an older ecosystem-policy without the query: approximate
+            # the bootstrap state with the canonical "admin" operator.
+            first_boot = operator_id == "admin" and not any(step_up.has_enrolled_factors("admin").values())
         if not first_boot and _authenticate_privileged(request, body) is None:
             if existing.get("totp"):
                 return web.json_response(
