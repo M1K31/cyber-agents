@@ -394,7 +394,9 @@ class ResponsePipeline:
         if decision.result == "require_approval":
             # Dedupe: the auto-block loop retries an open threat every 60s, so only
             # create a checkpoint if this threat has no pending block_ip approval.
-            marker = f"threat #{threat_id}"
+            # Match the exact summary delimiter ("threat #<id> (") so threat #1
+            # is not treated as pending because threat #15 has a checkpoint.
+            marker = f"threat #{threat_id} ("
             already_pending = any(
                 a.action == "block_ip" and marker in (a.summary or "")
                 for a in self.db.get_pending_approvals()

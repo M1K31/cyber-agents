@@ -563,23 +563,24 @@ def create_api(db: Database, pipeline: ResponsePipeline, *, step_up_auth: Any = 
         body = await _read_json_optional(request)
         operator_id = str(body.get("operator_id") or "admin").strip()
         existing = step_up.has_enrolled_factors(operator_id)
-        admin_bootstrapped = any(step_up.has_enrolled_factors("admin").values())
-        if existing.get("totp"):
-            if _authenticate_privileged(request, body) is None:
+        admin_factors = step_up.has_enrolled_factors("admin")
+        # Only the very first factor on a fresh store is loopback-only bootstrap
+        # (approximated by the canonical "admin" operator having no factors yet —
+        # the StepUpAuthenticator exposes no "any operator enrolled" query). Once
+        # bootstrapped, EVERY enrollment requires current step-up, not merely
+        # loopback: rotating any operator, enrolling a new operator, or adding a
+        # TOTP factor to an operator that already holds a passkey/device key.
+        first_boot = operator_id == "admin" and not any(admin_factors.values())
+        if not first_boot and _authenticate_privileged(request, body) is None:
+            if existing.get("totp"):
                 return web.json_response(
-                    {"detail": "TOTP already enrolled; provide current TOTP code to rotate"},
+                    {"detail": "TOTP already enrolled; provide current step-up to rotate"},
                     status=401,
                 )
-        elif admin_bootstrapped and operator_id != "admin":
-            # The system is already bootstrapped (the admin operator is enrolled).
-            # Creating an ADDITIONAL operator must be authorized by an existing
-            # operator's step-up, not merely by loopback access — otherwise an
-            # unprivileged local caller could mint a fresh policy_admin identity.
-            if _authenticate_privileged(request, body) is None:
-                return web.json_response(
-                    {"detail": "Enrolling an additional operator requires current step-up authorization"},
-                    status=403,
-                )
+            return web.json_response(
+                {"detail": "Enrollment requires current step-up authorization once the system is bootstrapped"},
+                status=403,
+            )
         enrolled = step_up.enroll_totp(operator_id, issuer="AegisSIEM-Daemon")
         return web.json_response(enrolled)
 
