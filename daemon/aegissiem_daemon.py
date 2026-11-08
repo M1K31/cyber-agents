@@ -288,8 +288,10 @@ def create_api(db: Database, pipeline: ResponsePipeline, *, step_up_auth: Any = 
     async def get_status(request: web.Request) -> web.Response:
         aggregated = db.get_threats_aggregated()
         blocked = db.get_blocked_ips()
-        profiles = db.get_profiles(limit=1000)
-        honeypot_events = db.get_honeypot_events(limit=1000)
+        # True totals from the DB, not len() of a 1000-row page, and the honeypot
+        # figure is an actual 24h window rather than "up to 1000 events ever".
+        profile_count = db.count_profiles()
+        honeypot_events_24h = db.count_honeypot_events(hours=24)
         pending_approvals = db.get_pending_approvals()
         by_status = aggregated.get("by_status", {}) if isinstance(aggregated, dict) else {}
         return web.json_response({
@@ -298,9 +300,9 @@ def create_api(db: Database, pipeline: ResponsePipeline, *, step_up_auth: Any = 
             "open_threats": by_status.get("open", 0),
             "blocked_count": len(blocked),
             "blocked_ips": len(blocked),
-            "profile_count": len(profiles) if isinstance(profiles, list) else 0,
-            "active_profiles": len(profiles) if isinstance(profiles, list) else 0,
-            "honeypot_events_24h": len(honeypot_events),
+            "profile_count": profile_count,
+            "active_profiles": profile_count,
+            "honeypot_events_24h": honeypot_events_24h,
             "pending_approvals": len(pending_approvals),
             "policy": policy_engine.export_state(),
             "timestamp": datetime.utcnow().isoformat(),

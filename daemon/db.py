@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -376,6 +376,22 @@ class Database:
             "SELECT * FROM attacker_profiles WHERE subnet_24 = ?", (subnet_24,)
         ).fetchall()
         return [self._row_to_profile(r) for r in rows]
+
+    def count_profiles(self) -> int:
+        """Total attacker profiles (not capped by a page limit)."""
+        return int(self.conn.execute("SELECT COUNT(*) FROM attacker_profiles").fetchone()[0])
+
+    def count_honeypot_events(self, hours: int = 24) -> int:
+        """Honeypot events within the last `hours` (default 24), no page limit.
+
+        Timestamps are stored as naive UTC (datetime.utcnow().isoformat()), so the
+        cutoff is computed the same way to keep the string comparison valid."""
+        since = (datetime.utcnow() - timedelta(hours=hours)).isoformat()
+        return int(
+            self.conn.execute(
+                "SELECT COUNT(*) FROM honeypot_events WHERE timestamp >= ?", (since,)
+            ).fetchone()[0]
+        )
 
     def _row_to_profile(self, row: sqlite3.Row) -> AttackerProfile:
         return AttackerProfile(
