@@ -421,13 +421,19 @@ def create_api(db: Database, pipeline: ResponsePipeline, *, step_up_auth: Any = 
                     break
         # Never pass an unvalidated path segment to the router SSH unblock: a
         # value with shell metacharacters would execute on the router's account.
-        # Only a well-formed IP address is ever forwarded.
+        # Only a well-formed, unscoped IP in canonical form is ever forwarded
+        # (a scoped IPv6 such as fe80::1%eth0 would carry a '%scope' suffix).
         try:
-            target_ip = str(ipaddress.ip_address(target_ip))
+            _addr = ipaddress.ip_address(target_ip)
         except ValueError:
             return web.json_response(
                 {"status": "error", "detail": "Invalid IP address"}, status=400
             )
+        if getattr(_addr, "scope_id", None):
+            return web.json_response(
+                {"status": "error", "detail": "Scoped IP addresses are not accepted"}, status=400
+            )
+        target_ip = _addr.compressed
         await pipeline.unblock(target_ip)
         return web.json_response({"status": "unblocked", "ip": target_ip})
 

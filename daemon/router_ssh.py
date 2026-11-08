@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import shlex
 from pathlib import Path
 from typing import Optional
 
@@ -84,8 +85,11 @@ async def block_ip(
     Returns:
         True if both rules were applied successfully.
     """
-    cmd_input = f"iptables -I INPUT -s {ip} -j DROP"
-    cmd_forward = f"iptables -I FORWARD -s {ip} -j DROP"
+    # Quote the IP: it is interpolated into a shell command run over SSH, and
+    # the caller is not the only path that reaches here (auto-block feeds it too).
+    q = shlex.quote(ip)
+    cmd_input = f"iptables -I INPUT -s {q} -j DROP"
+    cmd_forward = f"iptables -I FORWARD -s {q} -j DROP"
 
     success_input, out1 = await _run_command(host, cmd_input, username, key_file, port)
     success_forward, out2 = await _run_command(host, cmd_forward, username, key_file, port)
@@ -109,8 +113,9 @@ async def unblock_ip(
 
     Uses 2>/dev/null to suppress errors if rules don't exist.
     """
-    cmd_input = f"iptables -D INPUT -s {ip} -j DROP 2>/dev/null"
-    cmd_forward = f"iptables -D FORWARD -s {ip} -j DROP 2>/dev/null"
+    q = shlex.quote(ip)
+    cmd_input = f"iptables -D INPUT -s {q} -j DROP 2>/dev/null"
+    cmd_forward = f"iptables -D FORWARD -s {q} -j DROP 2>/dev/null"
 
     success1, _ = await _run_command(host, cmd_input, username, key_file, port)
     success2, _ = await _run_command(host, cmd_forward, username, key_file, port)
