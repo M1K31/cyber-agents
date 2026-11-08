@@ -229,8 +229,20 @@ class ResponsePipeline:
         )
 
     def _revert_provisional_containment(self, record: dict[str, Any]) -> None:
-        """Revert a provisional IP block when its async containment checkpoint is denied or expires."""
+        """Revert a provisional block or honeypot deployment when its async containment checkpoint is denied or expires."""
         plan = record.get("revert_plan") or {}
+        # Honeypot provisional teardown: tear the listeners back down so a
+        # denied/expired lease is a real revert, not a silent no-op.
+        if plan.get("teardown_honeypot"):
+            logger.info("Reverting provisional honeypot deployment (level=%s)", plan.get("level"))
+            if self.honeypot is not None:
+                try:
+                    loop = asyncio.get_running_loop()
+                    if loop.is_running():
+                        loop.create_task(self.honeypot.stop_all())
+                except RuntimeError:
+                    pass
+            return
         ip = plan.get("unblock_ip") or (record.get("target") or {}).get("blocked_ip")
         threat_id = plan.get("threat_id") or (record.get("target") or {}).get("threat_id")
         if not ip:
