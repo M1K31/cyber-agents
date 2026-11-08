@@ -344,6 +344,9 @@ tbody tr:hover {
 
 .toast.success { border-left: 3px solid var(--low); }
 .toast.error { border-left: 3px solid var(--critical); }
+/* Neither success nor failure: an action accepted but held (e.g. a block
+   awaiting operator approval). Amber to read as "attention / pending". */
+.toast.pending { border-left: 3px solid var(--high); }
 
 @keyframes slideIn {
     from { transform: translateX(100%); opacity: 0; }

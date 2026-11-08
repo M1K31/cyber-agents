@@ -310,8 +310,18 @@ function renderApprovals(approvals) {
 
 async function actionBlock(id) {
     try {
-        await apiPost('/api/threats/' + id + '/block');
-        showToast('Threat blocked successfully');
+        var result = await apiPost('/api/threats/' + id + '/block');
+        // A block that hits the approval gate returns 202 pending_approval
+        // (not an error, so apiPost does not throw). Report it as pending —
+        // the threat is NOT yet contained — rather than "blocked successfully".
+        if (result && result.status === 'pending_approval') {
+            showToast(
+                result.detail || 'Block requires operator approval; see Pending Approvals.',
+                'pending'
+            );
+        } else {
+            showToast('Threat blocked successfully');
+        }
         refreshAll();
     } catch (err) {
         showToast('Block failed: ' + err.message, 'error');
