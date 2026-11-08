@@ -326,29 +326,41 @@ class ResponsePipeline:
                     )
                     if hp_decision.result in ("allow", "allow_and_notify"):
                         await self.honeypot.deploy_for_level(level)
+                        # Every deployment claims a new lease, so an earlier lease's
+                        # revert can no longer tear down this newer deployment — even
+                        # when this one is a plain allow with no async-approval lease.
+                        self._honeypot_lease += 1
+                        lease_id = self._honeypot_lease
+                        self._active_honeypot_lease = lease_id
                         # Provisional containment: when the policy allowed this only
                         # under an async-approval lease, record a checkpoint with the
                         # TTL/revert plan so it is reviewed and can expire, rather than
                         # deploying listeners that linger unapproved.
                         if getattr(hp_decision, "async_approval", False):
-                            self._honeypot_lease += 1
-                            lease_id = self._honeypot_lease
-                            self._active_honeypot_lease = lease_id
-                            self.approval_manager.create_checkpoint(
-                                profile_id=profile.id if profile and profile.id else 0,
-                                action="confirm_provisional_honeypot",
-                                summary=(
-                                    f"Provisional honeypot deployment active for level "
-                                    f"{getattr(level, 'value', level)} ({threat.source_ip}). "
-                                    f"Deny or allow TTL expiry to tear it down."
-                                ),
-                                action_class="contain",
-                                target={"local_service": "honeypot", "level": getattr(level, "value", str(level)), "source_ip": threat.source_ip},
-                                async_containment=True,
-                                on_deny=hp_decision.on_deny or "revert",
-                                revert_plan={"teardown_honeypot": True, "level": getattr(level, "value", str(level)), "lease_id": lease_id},
-                                ttl_seconds=hp_decision.ttl_seconds or 86400,
-                            )
+                            try:
+                                self.approval_manager.create_checkpoint(
+                                    profile_id=profile.id if profile and profile.id else 0,
+                                    action="confirm_provisional_honeypot",
+                                    summary=(
+                                        f"Provisional honeypot deployment active for level "
+                                        f"{getattr(level, 'value', level)} ({threat.source_ip}). "
+                                        f"Deny or allow TTL expiry to tear it down."
+                                    ),
+                                    action_class="contain",
+                                    target={"local_service": "honeypot", "level": getattr(level, "value", str(level)), "source_ip": threat.source_ip},
+                                    async_containment=True,
+                                    on_deny=hp_decision.on_deny or "revert",
+                                    revert_plan={"teardown_honeypot": True, "level": getattr(level, "value", str(level)), "lease_id": lease_id},
+                                    ttl_seconds=hp_decision.ttl_seconds or 86400,
+                                )
+                            except Exception as exc:
+                                # Checkpoint storage failed: there is no TTL-backed
+                                # revert, so do not leave listeners up unapproved.
+                                logger.error("Honeypot checkpoint creation failed (%r); tearing down provisional deployment", exc)
+                                try:
+                                    await self.honeypot.stop_all()
+                                finally:
+                                    self._active_honeypot_lease = None
                     else:
                         logger.info("Honeypot deployment held by PolicyEngine (%s): %s", hp_decision.result, hp_decision.reason)
 

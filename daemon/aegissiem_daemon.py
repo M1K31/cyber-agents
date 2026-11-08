@@ -201,9 +201,23 @@ def _is_cross_site_browser(request: web.Request) -> bool:
     Modern browsers send `Sec-Fetch-Site: cross-site|same-site` on forged cross-
     origin requests and `same-origin`/`none` for first-party ones. Non-browser
     callers (the HMAC peer, curl) send no such header, so this never blocks them.
+
+    Some browsers (e.g. Safari < 16.4) omit Fetch Metadata, so when it is absent
+    fall back to the Origin header: a cross-origin page's Origin is not our own
+    loopback host. A request with neither header is treated as non-browser.
     """
     site = request.headers.get("Sec-Fetch-Site")
-    return bool(site) and site not in ("same-origin", "none")
+    if site:
+        return site not in ("same-origin", "none")
+    origin = request.headers.get("Origin")
+    if origin:
+        from urllib.parse import urlparse
+        try:
+            host = (urlparse(origin).hostname or "").lower()
+        except Exception:
+            return True
+        return host not in ("127.0.0.1", "::1", "localhost")
+    return False
 
 
 async def _read_json_optional(request: web.Request) -> dict[str, Any]:
@@ -291,6 +305,7 @@ def create_api(db: Database, pipeline: ResponsePipeline, *, step_up_auth: Any = 
         # True totals from the DB, not len() of a 1000-row page, and the honeypot
         # figure is an actual 24h window rather than "up to 1000 events ever".
         profile_count = db.count_profiles()
+        active_profiles = db.count_active_profiles()
         honeypot_events_24h = db.count_honeypot_events(hours=24)
         pending_approvals = db.get_pending_approvals()
         by_status = aggregated.get("by_status", {}) if isinstance(aggregated, dict) else {}
@@ -301,7 +316,7 @@ def create_api(db: Database, pipeline: ResponsePipeline, *, step_up_auth: Any = 
             "blocked_count": len(blocked),
             "blocked_ips": len(blocked),
             "profile_count": profile_count,
-            "active_profiles": profile_count,
+            "active_profiles": active_profiles,
             "honeypot_events_24h": honeypot_events_24h,
             "pending_approvals": len(pending_approvals),
             "policy": policy_engine.export_state(),
@@ -334,15 +349,17 @@ def create_api(db: Database, pipeline: ResponsePipeline, *, step_up_auth: Any = 
                  "detail": "Block requires operator approval; a checkpoint was created"},
                 status=202,
             )
-        if result == "denied":
-            return web.json_response(
-                {"status": "denied", "threat_id": threat_id, "detail": "Blocked by PolicyEngine"},
-                status=403,
-            )
+        # Freeze takes precedence over the generic denial: when Freeze is active the
+        # PolicyEngine returns "denied", but a 409 "frozen" is the accurate response.
         if policy_engine.export_state().get("frozen"):
             return web.json_response(
                 {"status": "frozen", "detail": "Ecosystem Freeze is active; mutating blocks are suspended"},
                 status=409,
+            )
+        if result == "denied":
+            return web.json_response(
+                {"status": "denied", "threat_id": threat_id, "detail": "Blocked by PolicyEngine"},
+                status=403,
             )
         return web.json_response({"status": "failed", "threat_id": threat_id}, status=500)
 
@@ -598,9 +615,15 @@ def create_api(db: Database, pipeline: ResponsePipeline, *, step_up_auth: Any = 
         if callable(_any_enrolled):
             first_boot = not _any_enrolled()
         else:
-            # Fallback for an older ecosystem-policy without the query: approximate
-            # the bootstrap state with the canonical "admin" operator.
-            first_boot = operator_id == "admin" and not any(step_up.has_enrolled_factors("admin").values())
+            # Fallback for an older ecosystem-policy without the store-wide query:
+            # treat the store as bootstrapped if the target operator OR admin holds
+            # ANY factor (not just admin/TOTP). This is conservative — a non-admin
+            # factor still forces step-up — at the cost of possibly requiring it a
+            # little early; upgrading ecosystem-policy restores exact behavior.
+            first_boot = (
+                not any(step_up.has_enrolled_factors(operator_id).values())
+                and not any(step_up.has_enrolled_factors("admin").values())
+            )
         if not first_boot and _authenticate_privileged(request, body) is None:
             if existing.get("totp"):
                 return web.json_response(
@@ -633,6 +656,11 @@ def create_api(db: Database, pipeline: ResponsePipeline, *, step_up_auth: Any = 
         requires operator step-up via /api/policy/resume.
         """
         body = await _read_json_optional(request)
+        # A malicious page could POST {"type":"policy.freeze"} to this loopback
+        # route; reject cross-site browser requests so only genuine peers/loopback
+        # tools (which carry no browser Origin/Fetch-Metadata) can deliver events.
+        if _is_cross_site_browser(request):
+            return web.json_response({"detail": "Cross-site request rejected"}, status=403)
         if not _is_loopback_request(request) and not _verify_hmac_peer(request, body):
             return web.json_response({"detail": "Authentication required for mesh events"}, status=401)
         etype = str(body.get("type") or body.get("event_type") or "")

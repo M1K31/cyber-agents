@@ -120,6 +120,7 @@ class Database:
             CREATE INDEX IF NOT EXISTS idx_profiles_ip ON attacker_profiles(ip);
             CREATE INDEX IF NOT EXISTS idx_profiles_subnet ON attacker_profiles(subnet_24);
             CREATE INDEX IF NOT EXISTS idx_honeypot_ip ON honeypot_events(attacker_ip);
+            CREATE INDEX IF NOT EXISTS idx_honeypot_timestamp ON honeypot_events(timestamp);
             CREATE INDEX IF NOT EXISTS idx_approvals_status ON approvals(status);
         """)
         self.conn.commit()
@@ -381,15 +382,29 @@ class Database:
         """Total attacker profiles (not capped by a page limit)."""
         return int(self.conn.execute("SELECT COUNT(*) FROM attacker_profiles").fetchone()[0])
 
+    def count_active_profiles(self) -> int:
+        """Profiles that have escalated past OBSERVE (escalation_level >= 1), i.e.
+        'active' attackers — matching how the MCP status tool counts them."""
+        return int(
+            self.conn.execute(
+                "SELECT COUNT(*) FROM attacker_profiles WHERE escalation_level >= 1"
+            ).fetchone()[0]
+        )
+
     def count_honeypot_events(self, hours: int = 24) -> int:
         """Honeypot events within the last `hours` (default 24), no page limit.
 
         Timestamps are stored as naive UTC (datetime.utcnow().isoformat()), so the
         cutoff is computed the same way to keep the string comparison valid."""
-        since = (datetime.utcnow() - timedelta(hours=hours)).isoformat()
+        now = datetime.utcnow()
+        since = (now - timedelta(hours=hours)).isoformat()
+        # Upper-bound at 'now' so events with a future timestamp (e.g. after a
+        # backward clock correction) are not counted in the 24h window.
+        upper = now.isoformat()
         return int(
             self.conn.execute(
-                "SELECT COUNT(*) FROM honeypot_events WHERE timestamp >= ?", (since,)
+                "SELECT COUNT(*) FROM honeypot_events WHERE timestamp >= ? AND timestamp <= ?",
+                (since, upper),
             ).fetchone()[0]
         )
 

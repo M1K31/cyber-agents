@@ -73,6 +73,8 @@ def handle_tool_call(name, arguments):
                 "rationale": arguments.get("rationale", ""),
             }
             headers = _signed_headers("POST", url, payload)
+            if not headers:
+                return {"error": "Request signing failed (missing ecosystem secret?); not sending unsigned"}
             with httpx.Client(timeout=5) as client:
                 resp = client.post(url, json=payload, headers=headers)
                 if resp.status_code == 200:
