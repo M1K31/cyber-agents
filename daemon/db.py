@@ -233,6 +233,20 @@ class Database:
         )
         self.conn.commit()
 
+    def clear_auto_block_deadline(self, threat_id: int) -> None:
+        """Remove a threat's auto-block deadline.
+
+        Called when an operator denies (or the TTL expires on) a provisional
+        block: the threat goes back to ``open``, and without this its past
+        deadline would make ``get_open_threats_past_deadline`` hand it straight
+        back to the auto-block loop, overriding the decision.
+        """
+        self.conn.execute(
+            "UPDATE threats SET auto_block_at = NULL WHERE id = ?",
+            (threat_id,),
+        )
+        self.conn.commit()
+
     def _row_to_threat(self, row: sqlite3.Row) -> ThreatEvent:
         return ThreatEvent(
             id=row["id"],

@@ -266,9 +266,15 @@ class ResponsePipeline:
         self.db.unblock_ip(str(ip))
         if threat_id is not None:
             try:
+                # Clear the deadline BEFORE reopening: an open threat with a past
+                # auto_block_at is exactly what the auto-block loop picks up, so
+                # the denied block would be re-applied within a minute.
+                self.db.clear_auto_block_deadline(int(threat_id))
                 self.db.update_threat_status(int(threat_id), ThreatStatus.open)
             except Exception:
-                pass
+                logger.exception(
+                    "Could not reopen threat %s after reverting its provisional block", threat_id
+                )
         if self.router_host:
             try:
                 loop = asyncio.get_running_loop()
