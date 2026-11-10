@@ -628,6 +628,10 @@ def create_api(db: Database, pipeline: ResponsePipeline, *, step_up_auth: Any = 
             return web.json_response({"detail": "TOTP enrollment restricted to loopback"}, status=403)
         body = await _read_json_optional(request)
         operator_id = str(body.get("operator_id") or "admin").strip()
+        if not operator_id or operator_id == _PEER_PRINCIPAL:
+            # Reserved: an operator with the peer's principal name would be
+            # indistinguishable from the signed peer in authorization and audit.
+            return web.json_response({"detail": "Invalid operator_id"}, status=400)
         existing = step_up.has_enrolled_factors(operator_id)
         # Only the very first factor on a fresh store is loopback-only bootstrap.
         # Once bootstrapped, EVERY enrollment requires current step-up, not merely
@@ -667,22 +671,23 @@ def create_api(db: Database, pipeline: ResponsePipeline, *, step_up_auth: Any = 
                     )
                 return web.json_response({"detail": detail}, status=403)
 
-            # Being authenticated is not enough: a factor may only be replaced by
-            # its owner, or by "admin" as the recovery path. Otherwise any operator
-            # (or anything holding the shared peer secret) could rotate someone
-            # else's TOTP, receive the new secret, and lock them out.
+            # Being authenticated is not enough.
             principal = auth_info[0]
-            if any(existing.values()):
-                if principal not in (operator_id, "admin") or principal == _PEER_PRINCIPAL:
-                    return web.json_response(
-                        {"detail": "Only the operator themself or admin may rotate an enrolled factor"},
-                        status=403,
-                    )
-            elif operator_id == "admin" and principal == _PEER_PRINCIPAL:
-                # "admin" carries that recovery privilege, so the non-human peer
-                # must not be able to mint the identity for itself.
+            if principal == _PEER_PRINCIPAL:
+                # The shared-secret peer is not a human operator and gets no say
+                # over human step-up factors: it may neither rotate one nor mint a
+                # new operator (which it could then use to create "admin" and
+                # inherit the recovery privilege below).
                 return web.json_response(
-                    {"detail": "The admin operator must be enrolled by an operator with step-up, not a signed peer"},
+                    {"detail": "Step-up factors can only be enrolled by an operator with step-up, not a signed peer"},
+                    status=403,
+                )
+            # A factor may only be replaced by its owner, or by "admin" as the
+            # recovery path. Otherwise any operator could rotate someone else's
+            # TOTP, receive the new secret, and lock them out.
+            if any(existing.values()) and principal not in (operator_id, "admin"):
+                return web.json_response(
+                    {"detail": "Only the operator themself or admin may rotate an enrolled factor"},
                     status=403,
                 )
         enrolled = step_up.enroll_totp(operator_id, issuer="AegisSIEM-Daemon")

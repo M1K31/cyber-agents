@@ -110,19 +110,29 @@ def test_operator_rotates_self_and_admin_rotates_others(eco_env):
     _run(eco_env, scenario)
 
 
-def test_hmac_peer_cannot_create_the_admin_identity(eco_env):
-    # Bootstrapped by someone other than "admin": the peer must not be able to
-    # mint itself the admin identity, which carries the recovery privilege.
+def test_hmac_peer_cannot_enrol_any_operator(eco_env):
+    # The shared-secret peer is not a human operator. If it could mint one
+    # ("carol"), it could then act as carol to create "admin" and inherit the
+    # recovery privilege, or simply hold a human identity nobody issued.
     async def scenario(client, h):
         status, _ = await h.enroll(client, "bob")
         assert status == 200
 
-        status, payload = await h.enroll_as_peer(client, "admin")
-        assert status == 403
-        assert "secret" not in payload
+        for operator_id in ("admin", "carol"):
+            status, payload = await h.enroll_as_peer(client, operator_id)
+            assert status == 403, operator_id
+            assert "secret" not in payload
 
-        status, _ = await h.enroll_as_peer(client, "carol")
-        assert status == 200  # adding an ordinary new operator is unchanged
+    _run(eco_env, scenario)
+
+
+def test_reserved_peer_principal_cannot_be_enrolled_as_an_operator(eco_env):
+    async def scenario(client, h):
+        # Even on a fresh store: an operator with this id would be
+        # indistinguishable from the signed peer in audit attribution.
+        status, payload = await h.enroll(client, "ecosystem-peer")
+        assert status == 400
+        assert "secret" not in payload
 
     _run(eco_env, scenario)
 
