@@ -27,6 +27,15 @@
             <ecosystem-override-modal id="override-modal"></ecosystem-override-modal>
         </section>
 
+        <!-- Stays on screen until the operator confirms: the secret is only ever
+             returned once, so a missed toast would leave them unable to finish setup. -->
+        <section id="totp-enroll-panel" class="enroll-panel" role="alertdialog" aria-labelledby="totp-enroll-title" aria-describedby="totp-enroll-help" hidden>
+            <h2 id="totp-enroll-title">Two-factor secret</h2>
+            <p id="totp-enroll-help">Shown once. Add it to your authenticator now.</p>
+            <code id="totp-enroll-secret" tabindex="0" aria-label="TOTP secret"></code>
+            <button id="btn-totp-enroll-done" type="button" class="btn btn-approve">I've saved it</button>
+        </section>
+
         <!-- Status Bar -->
         <section id="status-bar" class="status-bar">
             <div class="stat-card">

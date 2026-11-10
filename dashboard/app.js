@@ -128,9 +128,23 @@ function currentTotpPayload(extra) {
     return payload;
 }
 
-function clearTotpInput() {
+// A TOTP code is single-use. Clear it once the request that carried it has
+// succeeded — but only if the field still holds THAT code: the operator may
+// already have typed the next one while the request was in flight.
+function clearTotpInput(submittedCode) {
     var input = document.getElementById('totp-code');
-    if (input) input.value = '';
+    if (input && submittedCode && input.value.trim() === submittedCode) {
+        input.value = '';
+    }
+}
+
+// POST with the TOTP currently in the field (if any) merged into `extra`, and
+// clear that code on success.
+async function postWithTotp(path, extra) {
+    var payload = currentTotpPayload(extra);
+    var result = await apiPost(path, payload);
+    clearTotpInput(payload.totp_code);
+    return result;
 }
 
 async function apiPost(path, body) {
@@ -310,7 +324,7 @@ function renderApprovals(approvals) {
 
 async function actionBlock(id) {
     try {
-        var result = await apiPost('/api/threats/' + id + '/block');
+        var result = await postWithTotp('/api/threats/' + id + '/block');
         // A block that hits the approval gate returns 202 pending_approval
         // (not an error, so apiPost does not throw). Report it as pending —
         // the threat is NOT yet contained — rather than "blocked successfully".
@@ -330,7 +344,7 @@ async function actionBlock(id) {
 
 async function actionResolve(id) {
     try {
-        await apiPost('/api/threats/' + id + '/resolve');
+        await postWithTotp('/api/threats/' + id + '/resolve');
         showToast('Threat resolved');
         refreshAll();
     } catch (err) {
@@ -340,7 +354,7 @@ async function actionResolve(id) {
 
 async function actionUnblock(id) {
     try {
-        await apiPost('/api/blocked/' + id + '/unblock');
+        await postWithTotp('/api/blocked/' + id + '/unblock');
         showToast('IP unblocked');
         refreshAll();
     } catch (err) {
@@ -348,17 +362,9 @@ async function actionUnblock(id) {
     }
 }
 
-function _clearTotpInput() {
-    // A TOTP code is single-use; clear it after it is consumed so a second
-    // approval/deny does not resubmit a now-invalid code and fail authentication.
-    var totpInput = document.getElementById('totp-code');
-    if (totpInput) totpInput.value = '';
-}
-
 async function actionApprove(id) {
     try {
-        await apiPost('/api/approvals/' + id + '/approve');
-        _clearTotpInput();
+        await postWithTotp('/api/approvals/' + id + '/approve');
         showToast('Approval granted');
         refreshAll();
     } catch (err) {
@@ -368,8 +374,7 @@ async function actionApprove(id) {
 
 async function actionDeny(id) {
     try {
-        await apiPost('/api/approvals/' + id + '/deny');
-        _clearTotpInput();
+        await postWithTotp('/api/approvals/' + id + '/deny');
         showToast('Action denied');
         refreshAll();
     } catch (err) {
@@ -391,7 +396,7 @@ function initPolicyControls() {
         bar.addEventListener('ecosystem-manage-restrictions', function() { modal.open(); });
         bar.addEventListener('ecosystem-restore-restrictions', async function() {
             try {
-                await apiPost('/api/policy/restrictions/on', {});
+                await postWithTotp('/api/policy/restrictions/on', {});
                 showToast('Conservative Restrictions: On restored');
                 refreshAll();
             } catch (err) {
@@ -400,7 +405,9 @@ function initPolicyControls() {
         });
         bar.addEventListener('ecosystem-freeze-request', async function() {
             try {
-                await apiPost('/api/policy/freeze', {
+                // Sent even with an empty TOTP field: on the daemon host itself no
+                // step-up is needed. From another machine the daemon answers 401.
+                await postWithTotp('/api/policy/freeze', {
                     initiated_by: 'cyber-agents-dashboard',
                     channel: 'dashboard',
                     reason: 'Emergency Freeze triggered from AegisSIEM Daemon Dashboard'
@@ -408,15 +415,14 @@ function initPolicyControls() {
                 showToast('Ecosystem Freeze engaged');
                 refreshAll();
             } catch (err) {
-                showToast('Freeze failed: ' + err.message, 'error');
+                showToast('Freeze NOT engaged (a 6-digit TOTP code is required when not on the daemon host): ' + err.message, 'error');
             }
         });
         bar.addEventListener('ecosystem-resume-request', async function() {
             try {
-                await apiPost('/api/policy/resume', currentTotpPayload({
+                await postWithTotp('/api/policy/resume', {
                     reason: 'Operator resumed from AegisSIEM Daemon Dashboard'
-                }));
-                clearTotpInput();
+                });
                 showToast('Normal policy operation resumed');
                 refreshAll();
             } catch (err) {
@@ -426,13 +432,21 @@ function initPolicyControls() {
         modal.addEventListener('ecosystem-override-submit', async function(ev) {
             var d = ev.detail || {};
             try {
-                await apiPost('/api/policy/restrictions/off', {
+                // Field names follow validateOverrideForm's payload
+                // (duration_id, step_up.{method,credential}).
+                var stepUp = d.step_up || {};
+                var body = {
                     scope: d.scope,
-                    duration: d.duration,
-                    until_revoked: d.untilRevoked,
-                    reason: d.reason,
-                    totp_code: d.stepUpCredential
-                });
+                    duration: d.duration_id,
+                    until_revoked: d.duration_id === 'until_revoked',
+                    reason: d.reason
+                };
+                if (stepUp.method === 'totp') {
+                    body.totp_code = stepUp.credential;
+                } else if (stepUp.credential) {
+                    body.step_up_token = stepUp.credential;
+                }
+                await apiPost('/api/policy/restrictions/off', body);
                 showToast('Signed scoped Restrictions: Off grant active');
                 refreshAll();
             } catch (err) {
@@ -443,14 +457,43 @@ function initPolicyControls() {
     if (btnSetup) {
         btnSetup.addEventListener('click', async function() {
             try {
-                var res = await apiPost('/api/auth/step-up/totp/enroll', currentTotpPayload({ operator_id: 'admin' }));
-                clearTotpInput();
-                showToast('TOTP 2FA Secret: ' + res.secret);
+                var res = await postWithTotp('/api/auth/step-up/totp/enroll', { operator_id: 'admin' });
+                showEnrollSecret(res.secret);
+                res = null;
             } catch (err) {
                 showToast('2FA setup: ' + err.message, 'error');
             }
         });
     }
+}
+
+// The enrolment secret is returned exactly once. Keep it on screen until the
+// operator says they have stored it; it lives only in this DOM node — never in
+// a toast, a log, storage or a lingering variable.
+function showEnrollSecret(secret) {
+    var panel = document.getElementById('totp-enroll-panel');
+    var code = document.getElementById('totp-enroll-secret');
+    if (!panel || !code) {
+        showToast('2FA enrolled, but the secret panel is missing from this page; re-run setup after reloading.', 'error');
+        return;
+    }
+    code.textContent = secret;
+    panel.hidden = false;
+    code.focus();
+}
+
+function dismissEnrollSecret() {
+    var panel = document.getElementById('totp-enroll-panel');
+    var code = document.getElementById('totp-enroll-secret');
+    if (code) code.textContent = '';
+    if (panel) panel.hidden = true;
+}
+
+function initEnrollPanel() {
+    var done = document.getElementById('btn-totp-enroll-done');
+    if (done) done.addEventListener('click', dismissEnrollSecret);
+    // Do not leave the secret in a page that is being hidden or cached.
+    window.addEventListener('pagehide', dismissEnrollSecret);
 }
 
 // ── Polling ──
@@ -489,6 +532,7 @@ async function refreshAll() {
 
 function startPolling() {
     initPolicyControls();
+    initEnrollPanel();
     refreshAll();
     pollTimer = setInterval(refreshAll, POLL_INTERVAL);
 }
