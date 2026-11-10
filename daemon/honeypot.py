@@ -28,6 +28,8 @@ class BaseListener:
             self.port = port
         self.tarpit = tarpit
         self._server: Optional[asyncio.AbstractServer] = None
+        # Handler tasks for connections currently open, so stop() can drop them.
+        self._client_tasks: set[asyncio.Task] = set()
 
     async def start(self):
         self._server = await asyncio.start_server(
@@ -36,6 +38,11 @@ class BaseListener:
         logger.info("Honeypot %s listening on port %d (tarpit=%s)", self.service, self.port, self.tarpit)
 
     async def stop(self):
+        """Stop listening and drop every open connection.
+
+        Raises RuntimeError if a connection is still open afterwards, so the
+        caller keeps treating this listener as running.
+        """
         server = self._server
         if not server:
             return
@@ -46,17 +53,33 @@ class BaseListener:
             # block teardown — and anything awaiting it — indefinitely.
             await asyncio.wait_for(server.wait_closed(), timeout=STOP_WAIT_SECONDS)
         except asyncio.TimeoutError:
-            abort = getattr(server, "abort_clients", None)  # Python 3.13+
+            # Drop the held connections ourselves (Server.abort_clients only
+            # exists on 3.13+): cancelling a handler runs its finally block,
+            # which closes the writer.
+            clients = set(self._client_tasks)
+            for task in clients:
+                task.cancel()
+            abort = getattr(server, "abort_clients", None)
             if callable(abort):
                 abort()
+            if clients:
+                _, pending = await asyncio.wait(clients, timeout=STOP_WAIT_SECONDS)
+                if pending:
+                    raise RuntimeError(
+                        f"honeypot {self.service} on port {self.port}: "
+                        f"{len(pending)} connection(s) could not be closed"
+                    )
             logger.warning(
-                "Honeypot %s on port %d: connections still open after %.0fs; listener closed, clients dropped where supported",
-                self.service, self.port, STOP_WAIT_SECONDS,
+                "Honeypot %s on port %d: dropped %d connection(s) still open after %.0fs",
+                self.service, self.port, len(clients), STOP_WAIT_SECONDS,
             )
         self._server = None
         logger.info("Honeypot %s stopped on port %d", self.service, self.port)
 
     async def _handle_connection(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+        task = asyncio.current_task()
+        if task is not None:
+            self._client_tasks.add(task)
         peer = writer.get_extra_info("peername")
         attacker_ip = peer[0] if peer else "unknown"
         logger.info("Honeypot %s connection from %s", self.service, attacker_ip)
@@ -72,6 +95,8 @@ class BaseListener:
                 await writer.wait_closed()
             except Exception:
                 pass
+            if task is not None:
+                self._client_tasks.discard(task)
 
     async def _interact(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, attacker_ip: str):
         raise NotImplementedError

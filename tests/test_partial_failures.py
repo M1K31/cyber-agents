@@ -107,38 +107,103 @@ def test_teardown_for_a_superseded_lease_does_not_stop_the_newer_deployment(eco_
         db.close()
 
 
-def test_listener_stop_is_bounded_when_a_client_holds_the_connection(eco_env, monkeypatch):
+class _HeldServer:
+    """A server whose wait_closed() never returns while a client is connected."""
+
+    def __init__(self):
+        self.closed = False
+
+    def close(self):
+        self.closed = True
+
+    async def wait_closed(self):
+        await asyncio.Event().wait()
+
+
+def test_listener_stop_drops_a_client_that_holds_the_connection(eco_env, monkeypatch):
     # Since Python 3.12 Server.wait_closed() waits for every open connection. A
     # tarpitted attacker who never hangs up must not be able to block teardown
-    # (and, through the auto-block loop's retry, the whole containment loop).
+    # (and, through the auto-block loop's retry, the whole containment loop) —
+    # and "stopped" must mean their connection is actually gone.
     from daemon import honeypot
-
-    class HeldServer:
-        def __init__(self):
-            self.closed = False
-            self.aborted = False
-
-        def close(self):
-            self.closed = True
-
-        async def wait_closed(self):
-            await asyncio.Event().wait()  # never returns
-
-        def abort_clients(self):
-            self.aborted = True
 
     monkeypatch.setattr(honeypot, "STOP_WAIT_SECONDS", 0.05)
     db = Database(str(eco_env / "aegissiem.db"))
     try:
         listener = honeypot.BaseListener(db, port=2222)
-        server = HeldServer()
+        server = _HeldServer()
         listener._server = server
+        state = {}
 
-        asyncio.run(asyncio.wait_for(listener.stop(), timeout=2))
+        class Writer:
+            closed = False
 
-        assert server.closed      # no new connections
-        assert server.aborted     # lingering ones dropped where the runtime can
+            def get_extra_info(self, name):
+                return ("203.0.113.5", 4444)
+
+            def close(self):
+                Writer.closed = True
+
+            async def wait_closed(self):
+                return None
+
+        async def tarpit(reader, writer, attacker_ip):
+            await asyncio.Event().wait()  # holds the connection forever
+
+        listener._interact = tarpit
+
+        async def scenario():
+            client = asyncio.ensure_future(listener._handle_connection(None, Writer()))
+            await asyncio.sleep(0)
+            assert len(listener._client_tasks) == 1
+            await asyncio.wait_for(listener.stop(), timeout=2)
+            state["client_done"] = client.done()
+
+        asyncio.run(scenario())
+
+        assert server.closed            # no new connections
+        assert state["client_done"]     # the held one was dropped
+        assert Writer.closed
+        assert listener._client_tasks == set()
         assert listener._server is None
+    finally:
+        db.close()
+
+
+def test_listener_stop_reports_failure_if_a_connection_cannot_be_dropped(eco_env, monkeypatch):
+    from daemon import honeypot
+
+    monkeypatch.setattr(honeypot, "STOP_WAIT_SECONDS", 0.05)
+    db = Database(str(eco_env / "aegissiem.db"))
+    try:
+        mgr = HoneypotManager(db)
+        listener = honeypot.BaseListener(db, port=2222)
+        listener._server = _HeldServer()
+        mgr._listeners = [listener]
+
+        async def scenario():
+            release = asyncio.Event()
+
+            async def refuses_to_die():
+                while not release.is_set():
+                    try:
+                        await release.wait()
+                    except asyncio.CancelledError:
+                        continue  # ignores cancellation
+
+            stubborn = asyncio.ensure_future(refuses_to_die())
+            try:
+                listener._client_tasks.add(stubborn)
+                await asyncio.sleep(0)
+                # Still running => still this manager's to stop, teardown stays pending.
+                assert await asyncio.wait_for(mgr.stop_all(), timeout=2) == 1
+                assert mgr._listeners == [listener]
+                assert listener._server is not None
+            finally:
+                release.set()
+                await stubborn
+
+        asyncio.run(scenario())
     finally:
         db.close()
 
