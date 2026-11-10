@@ -237,6 +237,11 @@ async def _read_json_optional(request: web.Request) -> dict[str, Any]:
         return {}
 
 
+# Principal attributed to a request authenticated by the shared ecosystem HMAC
+# secret. It identifies "some trusted peer", never a human operator.
+_PEER_PRINCIPAL = "ecosystem-peer"
+
+
 def create_api(db: Database, pipeline: ResponsePipeline, *, step_up_auth: Any = None) -> web.Application:
     """Create the aiohttp web application with API routes, step-up auth, and policy controls."""
     from .ecosystem_bridge import (
@@ -252,6 +257,8 @@ def create_api(db: Database, pipeline: ResponsePipeline, *, step_up_auth: Any = 
     nonce_store = NonceStore(ttl_seconds=600)
     step_up = step_up_auth or get_step_up_auth()
     policy_engine = pipeline.policy_engine
+    # Non-empty once the legacy-authenticator warning has been logged for this app.
+    _legacy_bootstrap_warned: list[bool] = []
 
     def _verify_hmac_peer(request: web.Request, body: dict[str, Any] | None) -> bool:
         sig = request.headers.get("X-Ecosystem-Signature")
@@ -285,7 +292,7 @@ def create_api(db: Database, pipeline: ResponsePipeline, *, step_up_auth: Any = 
             # The signature proves possession of the shared ecosystem secret, not a
             # specific peer, so attribute to a fixed trusted-peer principal rather
             # than the spoofable client-supplied X-Ecosystem-Key-Id header.
-            return ("ecosystem-peer", "device_key", None)
+            return (_PEER_PRINCIPAL, "device_key", None)
 
         token = (
             str(body.get("step_up_token") or request.headers.get("X-Ecosystem-Step-Up") or "").strip()
@@ -627,28 +634,57 @@ def create_api(db: Database, pipeline: ResponsePipeline, *, step_up_auth: Any = 
         # loopback: rotating any operator, enrolling a new operator, or adding a
         # TOTP factor to an operator that already holds a passkey/device key.
         _any_enrolled = getattr(step_up, "has_any_enrolled_operator", None)
-        if callable(_any_enrolled):
-            first_boot = not _any_enrolled()
-        else:
-            # Fallback for an older ecosystem-policy without the store-wide query:
-            # treat the store as bootstrapped if the target operator OR admin holds
-            # ANY factor (not just admin/TOTP). This is conservative — a non-admin
-            # factor still forces step-up — at the cost of possibly requiring it a
-            # little early; upgrading ecosystem-policy restores exact behavior.
-            first_boot = (
-                not any(step_up.has_enrolled_factors(operator_id).values())
-                and not any(step_up.has_enrolled_factors("admin").values())
-            )
-        if not first_boot and _authenticate_privileged(request, body) is None:
-            if existing.get("totp"):
-                return web.json_response(
-                    {"detail": "TOTP already enrolled; provide current step-up to rotate"},
-                    status=401,
+        legacy_authenticator = not callable(_any_enrolled)
+        if legacy_authenticator:
+            # An ecosystem-policy without the store-wide query cannot prove the
+            # store is empty: probing only the target and "admin" misses any other
+            # enrolled operator, and would hand an unauthenticated loopback caller
+            # a fresh "admin" secret. Fail closed — never treat this as first boot.
+            if not _legacy_bootstrap_warned:
+                _legacy_bootstrap_warned.append(True)
+                logger.warning(
+                    "ecosystem-policy lacks StepUpAuthenticator.has_any_enrolled_operator; "
+                    "unauthenticated first-boot TOTP enrolment is disabled until appEcosystem is upgraded"
                 )
-            return web.json_response(
-                {"detail": "Enrollment requires current step-up authorization once the system is bootstrapped"},
-                status=403,
-            )
+            first_boot = False
+        else:
+            first_boot = not _any_enrolled()
+
+        if not first_boot:
+            auth_info = _authenticate_privileged(request, body)
+            if auth_info is None:
+                if existing.get("totp"):
+                    return web.json_response(
+                        {"detail": "TOTP already enrolled; provide current step-up to rotate"},
+                        status=401,
+                    )
+                detail = "Enrollment requires current step-up authorization once the system is bootstrapped"
+                if legacy_authenticator:
+                    detail = (
+                        "Cannot verify that the step-up store is empty: this ecosystem-policy "
+                        "build lacks has_any_enrolled_operator. Upgrade appEcosystem, or "
+                        "authenticate with an existing step-up factor."
+                    )
+                return web.json_response({"detail": detail}, status=403)
+
+            # Being authenticated is not enough: a factor may only be replaced by
+            # its owner, or by "admin" as the recovery path. Otherwise any operator
+            # (or anything holding the shared peer secret) could rotate someone
+            # else's TOTP, receive the new secret, and lock them out.
+            principal = auth_info[0]
+            if any(existing.values()):
+                if principal not in (operator_id, "admin") or principal == _PEER_PRINCIPAL:
+                    return web.json_response(
+                        {"detail": "Only the operator themself or admin may rotate an enrolled factor"},
+                        status=403,
+                    )
+            elif operator_id == "admin" and principal == _PEER_PRINCIPAL:
+                # "admin" carries that recovery privilege, so the non-human peer
+                # must not be able to mint the identity for itself.
+                return web.json_response(
+                    {"detail": "The admin operator must be enrolled by an operator with step-up, not a signed peer"},
+                    status=403,
+                )
         enrolled = step_up.enroll_totp(operator_id, issuer="AegisSIEM-Daemon")
         return web.json_response(enrolled)
 
