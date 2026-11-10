@@ -1024,7 +1024,9 @@ async def run_daemon():
         observer.join()
 
     await runner.cleanup()
-    await honeypot_manager.stop_all()
+    still_running = await honeypot_manager.stop_all()
+    if still_running:
+        logger.error("%d honeypot listener(s) could not be stopped during shutdown", still_running)
     db.close()
     logger.info("AegisSIEM daemon stopped.")
 

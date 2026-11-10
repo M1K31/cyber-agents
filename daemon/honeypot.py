@@ -243,7 +243,20 @@ class HoneypotManager:
                 except OSError as e:
                     logger.warning("Could not start %s honeypot: %s", listener.service, e)
 
-    async def stop_all(self):
+    async def stop_all(self) -> int:
+        """Stop every listener; return how many could NOT be stopped.
+
+        One listener failing must not leave the ones after it running, so every
+        listener is attempted. Listeners that failed stay in ``_listeners`` — they
+        are still this manager's to stop — and a later call retries them. Never
+        raises: callers run this during error handling and shutdown.
+        """
+        still_running: list[BaseListener] = []
         for listener in self._listeners:
-            await listener.stop()
-        self._listeners = []
+            try:
+                await listener.stop()
+            except Exception as exc:
+                logger.error("Could not stop %s honeypot: %r", getattr(listener, "service", "?"), exc)
+                still_running.append(listener)
+        self._listeners = still_running
+        return len(still_running)

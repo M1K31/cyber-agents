@@ -84,22 +84,32 @@ class ApprovalManager:
             created_at=datetime.utcnow(),
         )
         approval_id = self.db.insert_approval(approval)
-        state = self.policy_engine.export_state()
-        self.approval_queue.request_approval(
-            approval_id=_unified_approval_key(self.db, approval_id),
-            requester_service="aegissiem_daemon",
-            actor="aegissiem_daemon/response",
-            action=action,
-            action_class=action_class,
-            target=target or {"profile_id": profile_id},
-            summary=summary,
-            policy_version=int(state.get("policy_version", 3)),
-            mode=str(state.get("mode", "normal")),
-            ttl_seconds=ttl_seconds,
-            async_containment=async_containment,
-            on_deny=on_deny,
-            revert_plan=revert_plan,
-        )
+        try:
+            state = self.policy_engine.export_state()
+            self.approval_queue.request_approval(
+                approval_id=_unified_approval_key(self.db, approval_id),
+                requester_service="aegissiem_daemon",
+                actor="aegissiem_daemon/response",
+                action=action,
+                action_class=action_class,
+                target=target or {"profile_id": profile_id},
+                summary=summary,
+                policy_version=int(state.get("policy_version", 3)),
+                mode=str(state.get("mode", "normal")),
+                ttl_seconds=ttl_seconds,
+                async_containment=async_containment,
+                on_deny=on_deny,
+                revert_plan=revert_plan,
+            )
+        except Exception:
+            # The row exists but the queue never accepted it. Left "pending" it
+            # would show up for an operator to approve although nothing is queued
+            # (and the caller is about to undo whatever it was for).
+            try:
+                self.db.update_approval(approval_id, "failed")
+            except Exception:
+                logger.exception("Could not mark orphaned approval #%d as failed", approval_id)
+            raise
         logger.info("Created approval checkpoint #%d for profile %d: %s", approval_id, profile_id, action)
         return approval_id
 
@@ -205,6 +215,10 @@ class ResponsePipeline:
         # deployment it owns, so an expiring old lease cannot stop a newer one.
         self._honeypot_lease = 0
         self._active_honeypot_lease = None
+        # Lease whose teardown left listeners running; retried by auto_block_loop.
+        self._honeypot_teardown_pending: Any = None
+        # Strong references to fire-and-forget tasks (the loop holds weak ones).
+        self._background_tasks: set[asyncio.Task] = set()
         self.router_host = router_host
         self.router_user = router_user
         self.router_key = router_key
@@ -255,8 +269,11 @@ class ResponsePipeline:
                 logger.warning("Could not schedule honeypot teardown: no running event loop")
                 return
             if loop.is_running():
-                loop.create_task(self.honeypot.stop_all())
-                self._active_honeypot_lease = None
+                # The lease is released by the teardown itself, once the
+                # listeners are confirmed stopped — not here, before it has run.
+                task = loop.create_task(self._teardown_honeypot(lease_id))
+                self._background_tasks.add(task)
+                task.add_done_callback(self._background_tasks.discard)
             return
         ip = plan.get("unblock_ip") or (record.get("target") or {}).get("blocked_ip")
         threat_id = plan.get("threat_id") or (record.get("target") or {}).get("threat_id")
@@ -282,6 +299,38 @@ class ResponsePipeline:
                     loop.create_task(unblock_ip(str(ip), self.router_host, self.router_user, self.router_key))
             except RuntimeError:
                 pass
+
+    async def _teardown_honeypot(self, lease_id: Any) -> bool:
+        """Stop the honeypot listeners owned by ``lease_id``; True when none remain.
+
+        A lease that is no longer the active one is skipped: a newer deployment
+        owns the listeners now. If any listener cannot be stopped the lease is
+        kept and the teardown is marked pending, so the auto-block loop retries
+        it instead of leaving listeners up with nothing responsible for them.
+        """
+        if self.honeypot is None:
+            return True
+        if lease_id is not None and lease_id != self._active_honeypot_lease:
+            if self._honeypot_teardown_pending == lease_id:
+                self._honeypot_teardown_pending = None
+            return True
+        failed = await self.honeypot.stop_all()
+        if failed:
+            self._honeypot_teardown_pending = self._active_honeypot_lease
+            logger.error(
+                "Honeypot teardown incomplete: %d listener(s) still running (lease=%s); will retry",
+                failed, self._active_honeypot_lease,
+            )
+            return False
+        self._active_honeypot_lease = None
+        self._honeypot_teardown_pending = None
+        return True
+
+    async def _retry_pending_honeypot_teardown(self) -> None:
+        """Retry a teardown that previously left listeners running."""
+        pending = self._honeypot_teardown_pending
+        if pending is not None:
+            await self._teardown_honeypot(pending)
 
     async def handle_threat(self, threat: ThreatEvent):
         """Process a new threat through the full response pipeline.
@@ -363,10 +412,7 @@ class ResponsePipeline:
                                 # Checkpoint storage failed: there is no TTL-backed
                                 # revert, so do not leave listeners up unapproved.
                                 logger.error("Honeypot checkpoint creation failed (%r); tearing down provisional deployment", exc)
-                                try:
-                                    await self.honeypot.stop_all()
-                                finally:
-                                    self._active_honeypot_lease = None
+                                await self._teardown_honeypot(lease_id)
                     else:
                         logger.info("Honeypot deployment held by PolicyEngine (%s): %s", hp_decision.result, hp_decision.reason)
 
@@ -500,6 +546,9 @@ class ResponsePipeline:
         while True:
             try:
                 self.approval_manager.expire_due()
+                # Stopping our own listeners is cleanup, not a new mutation, so
+                # it is retried even while frozen.
+                await self._retry_pending_honeypot_teardown()
                 if not self.policy_engine.export_state().get("frozen"):
                     past_deadline = self.db.get_open_threats_past_deadline()
                     for threat in past_deadline:
