@@ -91,3 +91,65 @@ def test_daemon_hub_offline_deduplication(monkeypatch, tmp_path):
 
     asyncio.run(_run())
 
+
+
+def _threat_event():
+    from daemon.models import Severity, ThreatEvent, ThreatStatus
+
+    return ThreatEvent(
+        timestamp=datetime(2026, 11, 1, 20, 15, 0),
+        router_name="edge-gw",
+        threat_type="ssh_bruteforce",
+        source_ip="203.0.113.42",
+        severity=Severity.HIGH,
+        raw_log="x",
+        status=ThreatStatus.open,
+    )
+
+
+def test_scheduled_hub_publish_is_not_reported_as_delivered(monkeypatch):
+    from daemon import ecosystem_bridge
+
+    monkeypatch.setattr(
+        ecosystem_bridge,
+        "publish_threat_notification_sync",
+        lambda *a, **k: {"status": "scheduled", "dedupe_key": "k"},
+    )
+    channels = notifications.notify(_threat_event())
+    assert "ecosystem" not in channels
+    assert "ecosystem:scheduled" in channels
+
+
+def test_completed_hub_publish_is_reported_as_delivered(monkeypatch):
+    from daemon import ecosystem_bridge
+
+    monkeypatch.setattr(
+        ecosystem_bridge,
+        "publish_threat_notification_sync",
+        lambda *a, **k: {"status": "queued_offline"},
+    )
+    assert notifications.notify(_threat_event()) == ["ecosystem"]
+
+
+def test_scheduled_publish_task_is_retained_and_its_failure_is_logged(caplog):
+    from daemon import ecosystem_bridge
+
+    class DownHub:
+        async def notify(self, *args, **kwargs):
+            raise RuntimeError("hub down")
+
+    async def _run():
+        out = ecosystem_bridge.publish_threat_notification_sync(_threat_event(), hub=DownHub())
+        assert out["status"] == "scheduled"
+        # Held by the module so the loop's weak reference cannot let it be
+        # collected mid-flight.
+        assert len(ecosystem_bridge._pending_publish_tasks) == 1
+        for _ in range(5):
+            await asyncio.sleep(0)
+        assert len(ecosystem_bridge._pending_publish_tasks) == 0
+
+    with caplog.at_level("WARNING"):
+        asyncio.run(_run())
+    failures = [r for r in caplog.records if "scheduled hub publish" in r.getMessage().lower()]
+    assert len(failures) == 1
+    assert "203.0.113.42:high" in failures[0].getMessage()  # dedupe key, no payload

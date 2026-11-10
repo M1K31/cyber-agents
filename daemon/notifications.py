@@ -138,12 +138,19 @@ def notify(
             notified.append("imessage")
 
     try:
-        from .ecosystem_bridge import publish_threat_notification_sync
+        from . import ecosystem_bridge
 
-        if publish_threat_notification_sync(threat) is not None:
-            notified.append("ecosystem")
+        result = ecosystem_bridge.publish_threat_notification_sync(threat)
+        if result is not None:
+            # Inside a running event loop the publish is only scheduled; its
+            # outcome is not known yet, so do not claim the channel delivered.
+            # (ecosystem_bridge logs the task if it later fails.)
+            if result.get("status") == "scheduled":
+                notified.append("ecosystem:scheduled")
+            else:
+                notified.append("ecosystem")
     except Exception:
-        pass
+        logger.debug("Ecosystem hub notification skipped", exc_info=True)
 
     if not notified:
         logger.info("No notification channels configured or all failed")

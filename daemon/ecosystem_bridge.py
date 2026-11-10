@@ -242,6 +242,25 @@ async def publish_threat_notification(threat: Any, *, hub: Any = None) -> dict[s
     )
 
 
+_pending_publish_tasks: set[asyncio.Task] = set()
+
+
+def _on_scheduled_publish_done(task: asyncio.Task, dedupe_key: str) -> None:
+    """Release a scheduled publish and log it if it did not deliver.
+
+    Logs the dedupe key only — never the notification payload.
+    """
+    _pending_publish_tasks.discard(task)
+    if task.cancelled():
+        logger.warning("Scheduled hub publish cancelled before delivery (%s)", dedupe_key)
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.warning("Scheduled hub publish failed (%s): %r", dedupe_key, exc)
+    elif task.result() is None:
+        logger.warning("Scheduled hub publish was not delivered or queued (%s)", dedupe_key)
+
+
 def publish_threat_notification_sync(threat: Any, *, hub: Any = None) -> dict[str, Any] | None:
     """Best-effort synchronous wrapper callable from sync `daemon.notifications.notify()`."""
     target_hub = hub or _active_hub
@@ -254,8 +273,15 @@ def publish_threat_notification_sync(threat: Any, *, hub: Any = None) -> dict[st
 
     try:
         if loop is not None and loop.is_running():
-            loop.create_task(publish_threat_notification(threat, hub=target_hub))
-            return {"status": "scheduled", "dedupe_key": threat_dedupe_key(threat)}
+            dedupe_key = threat_dedupe_key(threat)
+            task = loop.create_task(publish_threat_notification(threat, hub=target_hub))
+            # The loop only holds a weak reference to a task: keep a strong one
+            # until it finishes, and surface a failure instead of losing it.
+            _pending_publish_tasks.add(task)
+            task.add_done_callback(lambda t, key=dedupe_key: _on_scheduled_publish_done(t, key))
+            # "scheduled" means exactly that — NOT delivered. Callers must not
+            # report the ecosystem channel as notified on this result.
+            return {"status": "scheduled", "dedupe_key": dedupe_key}
         return asyncio.run(publish_threat_notification(threat, hub=target_hub))
     except Exception as exc:
         logger.debug("publish_threat_notification_sync skipped: %r", exc)
