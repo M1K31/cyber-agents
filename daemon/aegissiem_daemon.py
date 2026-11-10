@@ -495,8 +495,19 @@ def create_api(db: Database, pipeline: ResponsePipeline, *, step_up_auth: Any = 
             return web.json_response(
                 {"status": "error", "detail": "Scoped IP addresses are not accepted"}, status=400
             )
+        # The DB row is matched by the string it was stored under (which may not
+        # be in canonical form); the router only ever sees the validated address.
+        stored_ip = target_ip
         target_ip = _addr.compressed
-        await pipeline.unblock(target_ip)
+        if not await pipeline.unblock(target_ip, db_ip=stored_ip):
+            return web.json_response(
+                {
+                    "status": "error",
+                    "detail": "Router did not confirm removal; IP remains blocked",
+                    "ip": target_ip,
+                },
+                status=502,
+            )
         return web.json_response({"status": "unblocked", "ip": target_ip})
 
     # ── Policy & Step-Up Routes ─────────────────────────────────────

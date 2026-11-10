@@ -474,12 +474,24 @@ class ResponsePipeline:
 
         return "blocked" if success else "failed"
 
-    async def unblock(self, ip: str) -> bool:
-        """Unblock an IP address."""
-        self.db.unblock_ip(ip)
+    async def unblock(self, ip: str, *, db_ip: Optional[str] = None) -> bool:
+        """Unblock an IP address; True only once the unblock is real.
 
+        The router goes first. The database row is closed only after the router
+        confirms the rule is gone, so a failed or unreachable router leaves the
+        IP listed as blocked instead of silently diverging from enforcement.
+
+        Args:
+            ip: Validated address sent to the router.
+            db_ip: The string the block was stored under, when it differs from
+                ``ip`` (e.g. a non-compressed IPv6 literal). Defaults to ``ip``.
+        """
         if self.router_host:
-            return await unblock_ip(ip, self.router_host, self.router_user, self.router_key)
+            confirmed = await unblock_ip(ip, self.router_host, self.router_user, self.router_key)
+            if not confirmed:
+                return False
+
+        self.db.unblock_ip(db_ip or ip)
         return True
 
     async def auto_block_loop(self):
