@@ -467,6 +467,17 @@ function initPolicyControls() {
     }
 }
 
+// The policy bar, Freeze button and override modal come from the shared
+// ecosystem bundle (/ui/ecosystem-ui-controls.js). If it did not load, the
+// custom elements never upgrade and render nothing — say so instead of leaving
+// an operator to assume there is simply nothing to show.
+function initUiAssetsNotice() {
+    var notice = document.getElementById('ui-assets-missing');
+    if (notice && !window.EcosystemUIControls) {
+        notice.hidden = false;
+    }
+}
+
 // The enrolment secret is returned exactly once. Keep it on screen until the
 // operator says they have stored it; it lives only in this DOM node — never in
 // a toast, a log, storage or a lingering variable.
@@ -531,6 +542,7 @@ async function refreshAll() {
 }
 
 function startPolling() {
+    initUiAssetsNotice();
     initPolicyControls();
     initEnrollPanel();
     refreshAll();

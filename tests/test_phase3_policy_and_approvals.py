@@ -49,10 +49,8 @@ def test_phase3_f10_auth_policy_freeze_and_provisional_revert(tmp_path: Path, mo
             assert st["mode"] == "normal"
             assert st["restrictions"] == "on"
 
-            r_js = await client.get("/ui/ecosystem-ui-controls.js")
-            assert r_js.status == 200
-            r_css = await client.get("/ui/ecosystem-theme.css")
-            assert r_css.status == 200
+            # (/ui/ asset serving is covered hermetically in tests/test_ui_assets.py;
+            # asserting it here required a built appEcosystem dist/ next door.)
 
             # 2. F10: Unauthenticated block and approval endpoints reject with 401
             r_unauth_block = await client.post(f"/api/threats/{threat_id}/block", json={})

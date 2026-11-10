@@ -30,6 +30,8 @@ Cyber Agents includes **no** telemetry beacons, analytics SDKs, or third-party t
 ## 5. Data Retention & Erasure
 Operators retain full custody of all local files and databases. All local daemon state lives under `~/.aegissiem-daemon/` (overridable via `CYBER_HARNESS_STATE_DIR`): the SQLite database `aegissiem.db`, `config.yml`, the policy state `policy_state.json`, and the `vault/threat-data/` directory. Removing that directory permanently deletes all locally stored threat records and logs.
 
+**Step-up enrollment is stored separately.** Removing the state directory does *not* remove operator step-up factors (TOTP secrets, passkeys, device keys). They live in a single file: the path in `CYBER_HARNESS_STEP_UP_PATH` when that variable is set, otherwise `step_up_credentials.json` inside the policy key directory described below. To fully erase this daemon's enrollment, delete that file as well; until you do, a restarted daemon still accepts the old factors.
+
 > **Shared credentials — delete with care.** Step-up credentials and policy keys default to `~/.config/ecosystem/` (overridable via `ECOSYSTEM_POLICY_KEY_DIR`). This directory is **shared with other ecosystem services** (AegisSIEM, the hub, etc.); removing it also erases *their* step-up enrollment and can interrupt their authentication. Delete it only when decommissioning the whole ecosystem, not just this daemon.
 
 ## 6. Contact Information

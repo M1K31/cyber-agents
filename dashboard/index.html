@@ -25,6 +25,11 @@
         <section style="margin-bottom:16px;" aria-label="Ecosystem Policy Controls">
             <ecosystem-policy-bar id="policy-bar" view-mode="admin"></ecosystem-policy-bar>
             <ecosystem-override-modal id="override-modal"></ecosystem-override-modal>
+            <!-- Revealed by app.js when /ui/ecosystem-ui-controls.js did not load, so a
+                 missing policy bar / Freeze control is never a silent blank. -->
+            <div id="ui-assets-missing" class="notice-banner" role="alert" hidden>
+                Shared ecosystem UI controls are not installed. Policy bar, Freeze and override controls are unavailable in this view. Run appEcosystem's scripts/install-local.sh, or set APP_ECOSYSTEM_PATH.
+            </div>
         </section>
 
         <!-- Stays on screen until the operator confirms: the secret is only ever

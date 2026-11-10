@@ -423,3 +423,15 @@ footer {
     overflow-wrap: anywhere;
 }
 .enroll-panel .btn { min-height: 44px; padding: 0 14px; }
+
+/* ── Shared UI controls unavailable ── */
+.notice-banner {
+    padding: 12px 16px;
+    background: var(--bg-card);
+    border: 1px solid var(--high);
+    border-left: 4px solid var(--high);
+    border-radius: var(--radius);
+    color: var(--text-primary);
+    font-size: 13px;
+}
+.notice-banner[hidden] { display: none; }
