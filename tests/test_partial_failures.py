@@ -105,3 +105,80 @@ def test_teardown_for_a_superseded_lease_does_not_stop_the_newer_deployment(eco_
         assert pipeline._honeypot_teardown_pending is None
     finally:
         db.close()
+
+
+def test_listener_stop_is_bounded_when_a_client_holds_the_connection(eco_env, monkeypatch):
+    # Since Python 3.12 Server.wait_closed() waits for every open connection. A
+    # tarpitted attacker who never hangs up must not be able to block teardown
+    # (and, through the auto-block loop's retry, the whole containment loop).
+    from daemon import honeypot
+
+    class HeldServer:
+        def __init__(self):
+            self.closed = False
+            self.aborted = False
+
+        def close(self):
+            self.closed = True
+
+        async def wait_closed(self):
+            await asyncio.Event().wait()  # never returns
+
+        def abort_clients(self):
+            self.aborted = True
+
+    monkeypatch.setattr(honeypot, "STOP_WAIT_SECONDS", 0.05)
+    db = Database(str(eco_env / "aegissiem.db"))
+    try:
+        listener = honeypot.BaseListener(db, port=2222)
+        server = HeldServer()
+        listener._server = server
+
+        asyncio.run(asyncio.wait_for(listener.stop(), timeout=2))
+
+        assert server.closed      # no new connections
+        assert server.aborted     # lingering ones dropped where the runtime can
+        assert listener._server is None
+    finally:
+        db.close()
+
+
+def test_teardown_does_not_clobber_a_lease_claimed_while_it_was_stopping(eco_env):
+    db = Database(str(eco_env / "aegissiem.db"))
+    try:
+        mgr = HoneypotManager(db)
+        pipeline = ResponsePipeline(db=db, honeypot_manager=mgr)
+
+        class ClaimsNewLeaseWhileStopping(FakeListener):
+            async def stop(self):
+                await super().stop()
+                pipeline._active_honeypot_lease = 9  # a newer deployment took over
+
+        mgr._listeners = [ClaimsNewLeaseWhileStopping()]
+        pipeline._active_honeypot_lease = 7
+
+        assert asyncio.run(pipeline._teardown_honeypot(7)) is True
+        assert pipeline._active_honeypot_lease == 9
+    finally:
+        db.close()
+
+
+def test_failed_teardown_records_the_lease_it_was_asked_to_tear_down(eco_env):
+    db = Database(str(eco_env / "aegissiem.db"))
+    try:
+        mgr = HoneypotManager(db)
+        pipeline = ResponsePipeline(db=db, honeypot_manager=mgr)
+
+        class FailsAndLeaseMoves(FakeListener):
+            async def stop(self):
+                pipeline._active_honeypot_lease = 9
+                raise OSError("busy")
+
+        mgr._listeners = [FailsAndLeaseMoves()]
+        pipeline._active_honeypot_lease = 7
+
+        assert asyncio.run(pipeline._teardown_honeypot(7)) is False
+        assert pipeline._honeypot_teardown_pending == 7
+        assert pipeline._active_honeypot_lease == 9
+    finally:
+        db.close()

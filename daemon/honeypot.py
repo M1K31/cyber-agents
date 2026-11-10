@@ -12,6 +12,9 @@ from .models import EscalationLevel, HoneypotEvent
 
 logger = logging.getLogger(__name__)
 
+# Upper bound on waiting for a listener's open connections when stopping it.
+STOP_WAIT_SECONDS = 5.0
+
 
 class BaseListener:
     """Base class for honeypot listeners."""
@@ -33,10 +36,25 @@ class BaseListener:
         logger.info("Honeypot %s listening on port %d (tarpit=%s)", self.service, self.port, self.tarpit)
 
     async def stop(self):
-        if self._server:
-            self._server.close()
-            await self._server.wait_closed()
-            logger.info("Honeypot %s stopped on port %d", self.service, self.port)
+        server = self._server
+        if not server:
+            return
+        server.close()  # stop accepting; from here no new attacker can connect
+        try:
+            # Since Python 3.12 wait_closed() also waits for every open
+            # connection. A tarpitted client that never hangs up would otherwise
+            # block teardown — and anything awaiting it — indefinitely.
+            await asyncio.wait_for(server.wait_closed(), timeout=STOP_WAIT_SECONDS)
+        except asyncio.TimeoutError:
+            abort = getattr(server, "abort_clients", None)  # Python 3.13+
+            if callable(abort):
+                abort()
+            logger.warning(
+                "Honeypot %s on port %d: connections still open after %.0fs; listener closed, clients dropped where supported",
+                self.service, self.port, STOP_WAIT_SECONDS,
+            )
+        self._server = None
+        logger.info("Honeypot %s stopped on port %d", self.service, self.port)
 
     async def _handle_connection(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         peer = writer.get_extra_info("peername")

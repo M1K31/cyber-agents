@@ -217,6 +217,8 @@ class ResponsePipeline:
         self._active_honeypot_lease = None
         # Lease whose teardown left listeners running; retried by auto_block_loop.
         self._honeypot_teardown_pending: Any = None
+        # Serialises honeypot deployment and teardown.
+        self._honeypot_lock = asyncio.Lock()
         # Strong references to fire-and-forget tasks (the loop holds weak ones).
         self._background_tasks: set[asyncio.Task] = set()
         self.router_host = router_host
@@ -310,21 +312,29 @@ class ResponsePipeline:
         """
         if self.honeypot is None:
             return True
-        if lease_id is not None and lease_id != self._active_honeypot_lease:
-            if self._honeypot_teardown_pending == lease_id:
+        # Serialised with deployment (see handle_threat) so a teardown can never
+        # interleave with a newer deployment claiming the listeners.
+        async with self._honeypot_lock:
+            if lease_id is not None and lease_id != self._active_honeypot_lease:
+                if self._honeypot_teardown_pending == lease_id:
+                    self._honeypot_teardown_pending = None
+                return True
+            owned = self._active_honeypot_lease if lease_id is None else lease_id
+            failed = await self.honeypot.stop_all()
+            if failed:
+                self._honeypot_teardown_pending = owned
+                logger.error(
+                    "Honeypot teardown incomplete: %d listener(s) still running (lease=%s); will retry",
+                    failed, owned,
+                )
+                return False
+            # Release only what this teardown owned: never clear a lease that
+            # changed hands while the listeners were being stopped.
+            if self._active_honeypot_lease == owned:
+                self._active_honeypot_lease = None
+            if self._honeypot_teardown_pending == owned:
                 self._honeypot_teardown_pending = None
             return True
-        failed = await self.honeypot.stop_all()
-        if failed:
-            self._honeypot_teardown_pending = self._active_honeypot_lease
-            logger.error(
-                "Honeypot teardown incomplete: %d listener(s) still running (lease=%s); will retry",
-                failed, self._active_honeypot_lease,
-            )
-            return False
-        self._active_honeypot_lease = None
-        self._honeypot_teardown_pending = None
-        return True
 
     async def _retry_pending_honeypot_teardown(self) -> None:
         """Retry a teardown that previously left listeners running."""
@@ -380,13 +390,16 @@ class ResponsePipeline:
                         rationale=f"Escalation level {level} for {threat.source_ip}",
                     )
                     if hp_decision.result in ("allow", "allow_and_notify"):
-                        await self.honeypot.deploy_for_level(level)
-                        # Every deployment claims a new lease, so an earlier lease's
-                        # revert can no longer tear down this newer deployment — even
-                        # when this one is a plain allow with no async-approval lease.
-                        self._honeypot_lease += 1
-                        lease_id = self._honeypot_lease
-                        self._active_honeypot_lease = lease_id
+                        # Deploy and claim the lease as one step with respect to
+                        # teardown (same lock as _teardown_honeypot).
+                        async with self._honeypot_lock:
+                            await self.honeypot.deploy_for_level(level)
+                            # Every deployment claims a new lease, so an earlier lease's
+                            # revert can no longer tear down this newer deployment — even
+                            # when this one is a plain allow with no async-approval lease.
+                            self._honeypot_lease += 1
+                            lease_id = self._honeypot_lease
+                            self._active_honeypot_lease = lease_id
                         # Provisional containment: when the policy allowed this only
                         # under an async-approval lease, record a checkpoint with the
                         # TTL/revert plan so it is reviewed and can expire, rather than
