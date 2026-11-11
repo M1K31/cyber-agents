@@ -226,6 +226,9 @@ class ResponsePipeline:
         self._pending_reverts: dict[str, Optional[int]] = {}
         # Serialises router blocks with queued reverts of the same address.
         self._containment_lock = asyncio.Lock()
+        # Threat whose block currently owns each address: {ip: threat_id}. A
+        # revert for any other threat must not lift that block.
+        self._block_owner: dict[str, int] = {}
         # Serialises honeypot deployment and teardown.
         self._honeypot_lock = asyncio.Lock()
         # Strong references to fire-and-forget tasks (the loop holds weak ones).
@@ -301,8 +304,18 @@ class ResponsePipeline:
             except Exception:
                 logger.exception("Could not clear the auto-block deadline of threat %s", tid)
 
+        if self._superseded(ip, tid):
+            # A newer block of the same address is in force. Reverting this
+            # older one must not lift it: the address stays blocked.
+            logger.info(
+                "Not unblocking %s for threat %s: a newer block (threat %s) is in force",
+                ip, tid, self._block_owner.get(ip),
+            )
+            return
+
         if not self.router_host:
             self.db.unblock_ip(ip)
+            self._block_owner.pop(ip, None)
             self._reopen_threat(tid)
             return
 
@@ -322,6 +335,15 @@ class ResponsePipeline:
         else:
             logger.warning("Revert of %s queued; it will be applied by the auto-block loop", ip)
 
+    def _superseded(self, ip: str, threat_id: Optional[int]) -> bool:
+        """True when a block recorded for a DIFFERENT threat currently owns ``ip``.
+
+        Ownership is tracked in memory, so after a restart (owner unknown) a
+        revert proceeds as it always did.
+        """
+        owner = self._block_owner.get(ip)
+        return owner is not None and threat_id is not None and owner != threat_id
+
     def _reopen_threat(self, threat_id: Optional[int]) -> None:
         if threat_id is None:
             return
@@ -338,6 +360,9 @@ class ResponsePipeline:
                 # the queued revert, and must not be undone by it.
                 if self._pending_reverts.get(ip, _NOT_QUEUED) != threat_id:
                     continue
+                if self._superseded(ip, threat_id):
+                    self._pending_reverts.pop(ip, None)
+                    continue
                 try:
                     confirmed = await self.unblock(ip)
                 except Exception:
@@ -349,6 +374,7 @@ class ResponsePipeline:
                     )
                     continue
                 self._pending_reverts.pop(ip, None)
+                self._block_owner.pop(ip, None)
             self._reopen_threat(threat_id)
 
     async def _teardown_honeypot(self, lease_id: Any) -> bool:
@@ -544,6 +570,7 @@ class ResponsePipeline:
             self.db.insert_blocked_ip(blocked)
             self.db.update_threat_status(threat_id, ThreatStatus.blocked)
             self._pending_reverts.pop(threat.source_ip, None)
+            self._block_owner[threat.source_ip] = threat_id
             success = True
         else:
             # Serialised with queued reverts (see _retry_pending_reverts): a
@@ -566,6 +593,7 @@ class ResponsePipeline:
                     self.db.update_threat_status(threat_id, ThreatStatus.blocked)
                     # This block supersedes any revert still queued for the address.
                     self._pending_reverts.pop(threat.source_ip, None)
+                    self._block_owner[threat.source_ip] = threat_id
                     logger.info("Blocked threat #%d: %s", threat_id, threat.source_ip)
                 else:
                     logger.error("Failed to block threat #%d: %s", threat_id, threat.source_ip)
