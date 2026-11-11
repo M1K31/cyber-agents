@@ -36,6 +36,10 @@ def _unified_approval_key(db: Database, approval_id: int) -> str:
     return f"cyber-agents-{scope}-{approval_id}"
 
 
+# Sentinel: "this address has no revert queued" (None is a valid threat id).
+_NOT_QUEUED = object()
+
+
 class ApprovalManager:
     """Manages human-in-the-loop approvals for escalation checkpoints and provisional containment."""
 
@@ -220,6 +224,8 @@ class ResponsePipeline:
         # Denied/expired provisional blocks whose router rule is not yet
         # confirmed removed: {ip: threat_id}. Retried by auto_block_loop.
         self._pending_reverts: dict[str, Optional[int]] = {}
+        # Serialises router blocks with queued reverts of the same address.
+        self._containment_lock = asyncio.Lock()
         # Serialises honeypot deployment and teardown.
         self._honeypot_lock = asyncio.Lock()
         # Strong references to fire-and-forget tasks (the loop holds weak ones).
@@ -327,17 +333,22 @@ class ResponsePipeline:
     async def _retry_pending_reverts(self) -> None:
         """Apply queued provisional-block reverts; keep the ones the router refuses."""
         for ip, threat_id in list(self._pending_reverts.items()):
-            try:
-                confirmed = await self.unblock(ip)
-            except Exception:
-                logger.exception("Revert of provisional block for %s failed", ip)
-                confirmed = False
-            if not confirmed:
-                logger.error(
-                    "Router did not confirm the revert of %s; it stays listed as blocked and will be retried", ip
-                )
-                continue
-            self._pending_reverts.pop(ip, None)
+            async with self._containment_lock:
+                # Re-check under the lock: a newer block of this address drops
+                # the queued revert, and must not be undone by it.
+                if self._pending_reverts.get(ip, _NOT_QUEUED) != threat_id:
+                    continue
+                try:
+                    confirmed = await self.unblock(ip)
+                except Exception:
+                    logger.exception("Revert of provisional block for %s failed", ip)
+                    confirmed = False
+                if not confirmed:
+                    logger.error(
+                        "Router did not confirm the revert of %s; it stays listed as blocked and will be retried", ip
+                    )
+                    continue
+                self._pending_reverts.pop(ip, None)
             self._reopen_threat(threat_id)
 
     async def _teardown_honeypot(self, lease_id: Any) -> bool:
@@ -532,25 +543,32 @@ class ResponsePipeline:
             blocked = BlockedIP(ip=threat.source_ip, router_name="unmanaged", blocked_by="auto")
             self.db.insert_blocked_ip(blocked)
             self.db.update_threat_status(threat_id, ThreatStatus.blocked)
+            self._pending_reverts.pop(threat.source_ip, None)
             success = True
         else:
-            success = await block_ip(
-                threat.source_ip,
-                self.router_host,
-                self.router_user,
-                self.router_key,
-            )
-            if success:
-                blocked = BlockedIP(
-                    ip=threat.source_ip,
-                    router_name=self.router_host,
-                    blocked_by="auto",
+            # Serialised with queued reverts (see _retry_pending_reverts): a
+            # revert of an OLDER block of this address must never run after,
+            # and so remove, this newer one.
+            async with self._containment_lock:
+                success = await block_ip(
+                    threat.source_ip,
+                    self.router_host,
+                    self.router_user,
+                    self.router_key,
                 )
-                self.db.insert_blocked_ip(blocked)
-                self.db.update_threat_status(threat_id, ThreatStatus.blocked)
-                logger.info("Blocked threat #%d: %s", threat_id, threat.source_ip)
-            else:
-                logger.error("Failed to block threat #%d: %s", threat_id, threat.source_ip)
+                if success:
+                    blocked = BlockedIP(
+                        ip=threat.source_ip,
+                        router_name=self.router_host,
+                        blocked_by="auto",
+                    )
+                    self.db.insert_blocked_ip(blocked)
+                    self.db.update_threat_status(threat_id, ThreatStatus.blocked)
+                    # This block supersedes any revert still queued for the address.
+                    self._pending_reverts.pop(threat.source_ip, None)
+                    logger.info("Blocked threat #%d: %s", threat_id, threat.source_ip)
+                else:
+                    logger.error("Failed to block threat #%d: %s", threat_id, threat.source_ip)
 
         if success and decision.async_approval:
             profile = self.db.get_profile_by_ip(threat.source_ip)
