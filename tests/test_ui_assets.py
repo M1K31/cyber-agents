@@ -72,3 +72,39 @@ def test_privacy_erasure_names_the_step_up_store():
     erasure = text[text.index("## 5. Data Retention & Erasure"):text.index("## 6.")]
     assert "CYBER_HARNESS_STEP_UP_PATH" in erasure
     assert "step_up_credentials.json" in erasure
+
+
+def _contrast(hex_a: str, hex_b: str) -> float:
+    def lum(h: str) -> float:
+        h = h.lstrip("#")
+        if len(h) == 3:
+            h = "".join(c * 2 for c in h)
+        chans = [int(h[i:i + 2], 16) / 255 for i in (0, 2, 4)]
+        lin = [c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4 for c in chans]
+        return 0.2126 * lin[0] + 0.7152 * lin[1] + 0.0722 * lin[2]
+
+    a, b = lum(hex_a), lum(hex_b)
+    return (max(a, b) + 0.05) / (min(a, b) + 0.05)
+
+
+def test_dashboard_action_buttons_meet_text_contrast():
+    """Apple HIG / WCAG AA: 4.5:1 for button labels (non-bold, under 18pt)."""
+    import re
+
+    css = (REPO / "dashboard" / "style.css").read_text()
+    variables = dict(re.findall(r"(--[\w-]+):\s*(#[0-9a-fA-F]{3,6})\s*;", css))
+
+    def resolve(value: str) -> str:
+        m = re.fullmatch(r"var\((--[\w-]+)\)", value.strip())
+        return variables[m.group(1)] if m else value.strip()
+
+    checked = 0
+    for name, body in re.findall(r"\.(btn-[\w-]+)\s*\{([^}]*)\}", css):
+        bg = re.search(r"background:\s*([^;]+);", body)
+        fg = re.search(r"(?<![-\w])color:\s*([^;]+);", body)
+        if not (bg and fg):
+            continue
+        ratio = _contrast(resolve(bg.group(1)), resolve(fg.group(1)))
+        assert ratio >= 4.5, f".{name}: {ratio:.2f}:1"
+        checked += 1
+    assert checked >= 5  # block, resolve, unblock, approve, deny

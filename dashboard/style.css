@@ -13,6 +13,9 @@
 
     /* Severity */
     --critical: #ef4444;
+    /* Fill under a white label (5.1:1). --critical itself is tuned as a text
+       colour on the dark page and is too light for that (3.8:1). */
+    --critical-fill: #da1b1b;
     --high: #f59e0b;
     --medium: #eab308;
     --low: #22c55e;
@@ -260,11 +263,11 @@ tbody tr:hover {
 .btn:active { transform: scale(0.97); }
 .btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
-.btn-block { background: var(--critical); color: #fff; }
+.btn-block { background: var(--critical-fill); color: #fff; }
 .btn-resolve { background: var(--low); color: #0a0e17; }
 .btn-unblock { background: var(--high); color: #0a0e17; }
 .btn-approve { background: var(--low); color: #0a0e17; }
-.btn-deny { background: var(--critical); color: #fff; }
+.btn-deny { background: var(--critical-fill); color: #fff; }
 
 .btn + .btn { margin-left: 0.4rem; }
 
