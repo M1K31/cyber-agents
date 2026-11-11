@@ -217,6 +217,9 @@ class ResponsePipeline:
         self._active_honeypot_lease = None
         # Lease whose teardown left listeners running; retried by auto_block_loop.
         self._honeypot_teardown_pending: Any = None
+        # Denied/expired provisional blocks whose router rule is not yet
+        # confirmed removed: {ip: threat_id}. Retried by auto_block_loop.
+        self._pending_reverts: dict[str, Optional[int]] = {}
         # Serialises honeypot deployment and teardown.
         self._honeypot_lock = asyncio.Lock()
         # Strong references to fire-and-forget tasks (the loop holds weak ones).
@@ -282,25 +285,60 @@ class ResponsePipeline:
         if not ip:
             return
         logger.info("Reverting provisional containment block for IP %s (threat=%s)", ip, threat_id)
-        self.db.unblock_ip(str(ip))
-        if threat_id is not None:
+        ip = str(ip)
+        tid = int(threat_id) if threat_id is not None else None
+        if tid is not None:
             try:
-                # Clear the deadline BEFORE reopening: an open threat with a past
-                # auto_block_at is exactly what the auto-block loop picks up, so
-                # the denied block would be re-applied within a minute.
-                self.db.clear_auto_block_deadline(int(threat_id))
-                self.db.update_threat_status(int(threat_id), ThreatStatus.open)
+                # The denial stands whatever happens next: drop the deadline now,
+                # so the auto-block loop cannot re-apply the block meanwhile.
+                self.db.clear_auto_block_deadline(tid)
             except Exception:
-                logger.exception(
-                    "Could not reopen threat %s after reverting its provisional block", threat_id
-                )
-        if self.router_host:
+                logger.exception("Could not clear the auto-block deadline of threat %s", tid)
+
+        if not self.router_host:
+            self.db.unblock_ip(ip)
+            self._reopen_threat(tid)
+            return
+
+        # A router is enforcing this block. Record the unblock only once the
+        # router confirms the rule is gone — exactly like the Unblock button —
+        # and keep it queued until then, so an unreachable router leaves the IP
+        # listed as blocked instead of silently diverging from enforcement.
+        self._pending_reverts[ip] = tid
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop is not None and loop.is_running():
+            task = loop.create_task(self._retry_pending_reverts())
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
+        else:
+            logger.warning("Revert of %s queued; it will be applied by the auto-block loop", ip)
+
+    def _reopen_threat(self, threat_id: Optional[int]) -> None:
+        if threat_id is None:
+            return
+        try:
+            self.db.update_threat_status(threat_id, ThreatStatus.open)
+        except Exception:
+            logger.exception("Could not reopen threat %s after reverting its provisional block", threat_id)
+
+    async def _retry_pending_reverts(self) -> None:
+        """Apply queued provisional-block reverts; keep the ones the router refuses."""
+        for ip, threat_id in list(self._pending_reverts.items()):
             try:
-                loop = asyncio.get_running_loop()
-                if loop.is_running():
-                    loop.create_task(unblock_ip(str(ip), self.router_host, self.router_user, self.router_key))
-            except RuntimeError:
-                pass
+                confirmed = await self.unblock(ip)
+            except Exception:
+                logger.exception("Revert of provisional block for %s failed", ip)
+                confirmed = False
+            if not confirmed:
+                logger.error(
+                    "Router did not confirm the revert of %s; it stays listed as blocked and will be retried", ip
+                )
+                continue
+            self._pending_reverts.pop(ip, None)
+            self._reopen_threat(threat_id)
 
     async def _teardown_honeypot(self, lease_id: Any) -> bool:
         """Stop the honeypot listeners owned by ``lease_id``; True when none remain.
@@ -562,6 +600,13 @@ class ResponsePipeline:
                 # Stopping our own listeners is cleanup, not a new mutation, so
                 # it is retried even while frozen.
                 await self._retry_pending_honeypot_teardown()
+                if self._pending_reverts:
+                    # Bounded: an SSH connect to a black-holed router can hang
+                    # for minutes and must not stall containment.
+                    try:
+                        await asyncio.wait_for(self._retry_pending_reverts(), timeout=30)
+                    except asyncio.TimeoutError:
+                        logger.error("Timed out retrying %d pending revert(s)", len(self._pending_reverts))
                 if not self.policy_engine.export_state().get("frozen"):
                     past_deadline = self.db.get_open_threats_past_deadline()
                     for threat in past_deadline:

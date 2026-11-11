@@ -88,8 +88,11 @@ async def block_ip(
     # Quote the IP: it is interpolated into a shell command run over SSH, and
     # the caller is not the only path that reaches here (auto-block feeds it too).
     q = shlex.quote(ip)
-    cmd_input = f"iptables -I INPUT -s {q} -j DROP"
-    cmd_forward = f"iptables -I FORWARD -s {q} -j DROP"
+    # iptables only holds IPv4 rules; an IPv6 address needs ip6tables or the
+    # command simply fails and the address is never blocked.
+    binary = "ip6tables" if ":" in ip else "iptables"
+    cmd_input = f"{binary} -I INPUT -s {q} -j DROP"
+    cmd_forward = f"{binary} -I FORWARD -s {q} -j DROP"
 
     success_input, out1 = await _run_command(host, cmd_input, username, key_file, port)
     success_forward, out2 = await _run_command(host, cmd_forward, username, key_file, port)

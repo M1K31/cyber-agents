@@ -69,3 +69,103 @@ def test_clearing_one_deadline_leaves_other_overdue_threats_eligible(eco_env):
         assert [t.id for t in db.get_open_threats_past_deadline()] == [other]
     finally:
         db.close()
+
+
+# ── The denial / TTL-expiry path must be as truthful as the Unblock button ──
+
+import asyncio  # noqa: E402
+
+
+def _blocked(db: Database, ip: str) -> int:
+    return _overdue_blocked_threat(db, ip)
+
+
+def test_revert_waits_for_the_router_before_recording_the_unblock(eco_env, monkeypatch):
+    calls: list[str] = []
+
+    async def router_ok(ip, host, username="admin", key_file=None, port=22):
+        calls.append(ip)
+        return True
+
+    monkeypatch.setattr("daemon.response.unblock_ip", router_ok)
+    db = Database(str(eco_env / "aegissiem.db"))
+    try:
+        pipeline = ResponsePipeline(db=db, router_host="192.0.2.1")
+        threat_id = _blocked(db, "198.51.100.42")
+
+        async def scenario():
+            pipeline._revert_provisional_containment(
+                {"revert_plan": {"unblock_ip": "198.51.100.42", "threat_id": threat_id}}
+            )
+            # Nothing is recorded until the router has answered.
+            assert [b.ip for b in db.get_blocked_ips()] == ["198.51.100.42"]
+            await asyncio.gather(*pipeline._background_tasks)
+
+        asyncio.run(scenario())
+
+        assert calls == ["198.51.100.42"]
+        assert db.get_blocked_ips() == []
+        assert db.get_threat(threat_id).status == ThreatStatus.open
+        assert db.get_threat(threat_id).auto_block_at is None
+    finally:
+        db.close()
+
+
+def test_revert_keeps_the_ip_blocked_when_the_router_does_not_confirm_then_retries(eco_env, monkeypatch):
+    router = {"up": False}
+
+    async def router_unblock(ip, host, username="admin", key_file=None, port=22):
+        return router["up"]
+
+    monkeypatch.setattr("daemon.response.unblock_ip", router_unblock)
+    db = Database(str(eco_env / "aegissiem.db"))
+    try:
+        pipeline = ResponsePipeline(db=db, router_host="192.0.2.1")
+        threat_id = _blocked(db, "198.51.100.42")
+
+        async def denied_while_router_down():
+            pipeline._revert_provisional_containment(
+                {"revert_plan": {"unblock_ip": "198.51.100.42", "threat_id": threat_id}}
+            )
+            await asyncio.gather(*pipeline._background_tasks)
+
+        asyncio.run(denied_while_router_down())
+
+        # The router is still dropping this IP, so it must still be listed as
+        # blocked and the threat must not be reported as reopened.
+        assert [b.ip for b in db.get_blocked_ips()] == ["198.51.100.42"]
+        assert db.get_threat(threat_id).status == ThreatStatus.blocked
+        # …but the denial is not forgotten, and is not re-blocked meanwhile.
+        assert db.get_threat(threat_id).auto_block_at is None
+        assert pipeline._pending_reverts == {"198.51.100.42": threat_id}
+
+        router["up"] = True
+        asyncio.run(pipeline._retry_pending_reverts())
+
+        assert db.get_blocked_ips() == []
+        assert db.get_threat(threat_id).status == ThreatStatus.open
+        assert pipeline._pending_reverts == {}
+    finally:
+        db.close()
+
+
+def test_revert_without_a_running_loop_is_queued_not_recorded(eco_env, monkeypatch):
+    async def router_ok(ip, host, username="admin", key_file=None, port=22):
+        return True
+
+    monkeypatch.setattr("daemon.response.unblock_ip", router_ok)
+    db = Database(str(eco_env / "aegissiem.db"))
+    try:
+        pipeline = ResponsePipeline(db=db, router_host="192.0.2.1")
+        threat_id = _blocked(db, "198.51.100.42")
+
+        pipeline._revert_provisional_containment(  # called from sync code
+            {"revert_plan": {"unblock_ip": "198.51.100.42", "threat_id": threat_id}}
+        )
+
+        assert [b.ip for b in db.get_blocked_ips()] == ["198.51.100.42"]
+        assert pipeline._pending_reverts == {"198.51.100.42": threat_id}
+        asyncio.run(pipeline._retry_pending_reverts())
+        assert db.get_blocked_ips() == []
+    finally:
+        db.close()

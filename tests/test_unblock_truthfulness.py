@@ -132,3 +132,64 @@ def test_pipeline_unblock_without_router_updates_db(eco_env):
         assert db.get_blocked_ips(active_only=True) == []
     finally:
         db.close()
+
+
+def test_router_block_uses_ip6tables_for_ipv6(monkeypatch):
+    calls: list[str] = []
+    monkeypatch.setattr(router_ssh, "_run_command", _fake_run("", calls=calls))
+    assert asyncio.run(router_ssh.block_ip("2001:db8::1", "r", "u", "k")) is True
+    assert len(calls) == 2
+    assert all(c.startswith("ip6tables -I ") for c in calls)
+
+    calls.clear()
+    assert asyncio.run(router_ssh.block_ip("198.51.100.42", "r", "u", "k")) is True
+    assert all(c.startswith("iptables -I ") for c in calls)
+
+
+def _stub_iptables(tmp_path, monkeypatch, *, rules: int, locked: bool = False):
+    """Put a fake iptables on PATH and run router commands through a real shell."""
+    import subprocess
+
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    count = tmp_path / "rules"
+    count.write_text(str(rules))
+    script = bindir / "iptables"
+    script.write_text(
+        "#!/bin/sh\n"
+        f'COUNT_FILE="{count}"\n'
+        + ("exit 4\n" if locked else "")
+        + 'n=$(cat "$COUNT_FILE")\n'
+        'case "$1" in\n'
+        '  -D) if [ "$n" -gt 0 ]; then echo $((n-1)) > "$COUNT_FILE"; exit 0; fi; echo "Bad rule" >&2; exit 1;;\n'
+        '  -C) if [ "$n" -gt 0 ]; then exit 0; fi; exit 1;;\n'
+        "esac\n"
+        "exit 2\n"
+    )
+    script.chmod(0o755)
+
+    async def run(host, command, username="admin", key_file=None, port=22, retries=1):
+        proc = subprocess.run(
+            ["sh", "-c", command],
+            capture_output=True,
+            text=True,
+            env={"PATH": f"{bindir}:/usr/bin:/bin"},
+        )
+        return proc.returncode == 0, (proc.stdout + proc.stderr).strip()
+
+    monkeypatch.setattr(router_ssh, "_run_command", run)
+    return count
+
+
+def test_unblock_command_removes_every_duplicate_rule_in_a_real_shell(tmp_path, monkeypatch):
+    # INPUT and FORWARD share the stub's counter: 3 copies in all.
+    count = _stub_iptables(tmp_path, monkeypatch, rules=3)
+    assert asyncio.run(router_ssh.unblock_ip("198.51.100.42", "r", "u", "k")) is True
+    assert count.read_text().strip() == "0"
+
+
+def test_unblock_command_is_not_confirmed_when_iptables_cannot_answer(tmp_path, monkeypatch):
+    # e.g. the xtables lock is held: -D and -C both fail with a non-1 code. That
+    # is "don't know", never "rule is gone".
+    _stub_iptables(tmp_path, monkeypatch, rules=1, locked=True)
+    assert asyncio.run(router_ssh.unblock_ip("198.51.100.42", "r", "u", "k")) is False
