@@ -21,9 +21,14 @@ dependencies = [
     # ecosystem.yaml), so these belong in the ordinary dependency list.
     # Published to PyPI; previously installed from a sibling checkout by
     # scripts/install-local.sh, which failed with only a warning when absent.
-    "appecosystem-client>=0.3.1",
+    "appecosystem-client>=0.4.0",   # first release with contracts + ulid
     "appecosystem-auth>=0.4.0",
-    "appecosystem-ai>=0.1.0,<0.2",  # capped: 0.1.0 is a first release
+    "appecosystem-ai>=0.1.1,<0.2",
+    # Policy engine and hub runtime. Published 2026-11-11; before that they were
+    # only importable from a sibling appEcosystem checkout, which is why a
+    # clean install could not start.
+    "appecosystem-policy>=0.3.0",
+    "appecosystem-hub>=0.1.0",
 ]
 
 [project.optional-dependencies]

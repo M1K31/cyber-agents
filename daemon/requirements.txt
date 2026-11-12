@@ -8,6 +8,8 @@ aiohttp>=3.9
 # appEcosystem integration — mirrors pyproject.toml, which is the source of
 # truth. Not optional: the harness is registered in ecosystem.yaml as the
 # preferred security-analysis backend.
-appecosystem-client>=0.3.1
+appecosystem-client>=0.4.0
 appecosystem-auth>=0.4.0
-appecosystem-ai>=0.1.0,<0.2
+appecosystem-ai>=0.1.1,<0.2
+appecosystem-policy>=0.3.0
+appecosystem-hub>=0.1.0
