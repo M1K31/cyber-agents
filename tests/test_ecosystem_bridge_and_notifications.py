@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -165,6 +165,9 @@ def test_scheduled_publish_task_is_retained_and_its_failure_is_logged(caplog):
         "2026-11-01 20:15:00",
         "2026-11-01T20:15:00.123456",
         "2026-11-01T20:59:59Z",
+        "2026-11-01T15:15:00-05:00",                       # the same instant, written in another zone
+        datetime(2026, 11, 1, 15, 15, tzinfo=timezone(timedelta(hours=-5))),
+        datetime(2026, 11, 1, 20, 15, tzinfo=timezone.utc),
     ],
 )
 def test_dedupe_key_is_the_same_for_datetime_and_iso_string(timestamp):

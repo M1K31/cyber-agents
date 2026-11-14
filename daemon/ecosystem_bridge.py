@@ -178,15 +178,19 @@ def _hour_bucket(ts: Any) -> str:
     Kept identical to AegisSIEM's `_hour_bucket`: the two apps must produce the
     same dedupe key for the same threat.
     """
-    if hasattr(ts, "strftime"):
-        return ts.strftime("%Y%m%d%H")
-    text = str(ts or "").strip()
-    try:
-        from datetime import datetime
+    from datetime import datetime, timezone
 
-        return datetime.fromisoformat(text.replace("Z", "+00:00")).strftime("%Y%m%d%H")
-    except ValueError:
-        return text[:13]
+    if not hasattr(ts, "strftime"):
+        text = str(ts or "").strip()
+        try:
+            ts = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return text[:13]
+    # An aware timestamp is converted to UTC first, so one instant written in
+    # two time zones lands in the same bucket. A naive one is taken as it is.
+    if getattr(ts, "tzinfo", None) is not None and ts.utcoffset() is not None:
+        ts = ts.astimezone(timezone.utc)
+    return ts.strftime("%Y%m%d%H")
 
 
 def threat_dedupe_key(threat: Any) -> str:
