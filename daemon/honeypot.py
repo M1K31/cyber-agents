@@ -12,6 +12,9 @@ from .models import EscalationLevel, HoneypotEvent
 
 logger = logging.getLogger(__name__)
 
+# Upper bound on waiting for a listener's open connections when stopping it.
+STOP_WAIT_SECONDS = 5.0
+
 
 class BaseListener:
     """Base class for honeypot listeners."""
@@ -25,6 +28,8 @@ class BaseListener:
             self.port = port
         self.tarpit = tarpit
         self._server: Optional[asyncio.AbstractServer] = None
+        # Handler tasks for connections currently open, so stop() can drop them.
+        self._client_tasks: set[asyncio.Task] = set()
 
     async def start(self):
         self._server = await asyncio.start_server(
@@ -33,12 +38,48 @@ class BaseListener:
         logger.info("Honeypot %s listening on port %d (tarpit=%s)", self.service, self.port, self.tarpit)
 
     async def stop(self):
-        if self._server:
-            self._server.close()
-            await self._server.wait_closed()
-            logger.info("Honeypot %s stopped on port %d", self.service, self.port)
+        """Stop listening and drop every open connection.
+
+        Raises RuntimeError if a connection is still open afterwards, so the
+        caller keeps treating this listener as running.
+        """
+        server = self._server
+        if not server:
+            return
+        server.close()  # stop accepting; from here no new attacker can connect
+        try:
+            # Since Python 3.12 wait_closed() also waits for every open
+            # connection. A tarpitted client that never hangs up would otherwise
+            # block teardown — and anything awaiting it — indefinitely.
+            await asyncio.wait_for(server.wait_closed(), timeout=STOP_WAIT_SECONDS)
+        except asyncio.TimeoutError:
+            # Drop the held connections ourselves (Server.abort_clients only
+            # exists on 3.13+): cancelling a handler runs its finally block,
+            # which closes the writer.
+            clients = set(self._client_tasks)
+            for task in clients:
+                task.cancel()
+            abort = getattr(server, "abort_clients", None)
+            if callable(abort):
+                abort()
+            if clients:
+                _, pending = await asyncio.wait(clients, timeout=STOP_WAIT_SECONDS)
+                if pending:
+                    raise RuntimeError(
+                        f"honeypot {self.service} on port {self.port}: "
+                        f"{len(pending)} connection(s) could not be closed"
+                    )
+            logger.warning(
+                "Honeypot %s on port %d: dropped %d connection(s) still open after %.0fs",
+                self.service, self.port, len(clients), STOP_WAIT_SECONDS,
+            )
+        self._server = None
+        logger.info("Honeypot %s stopped on port %d", self.service, self.port)
 
     async def _handle_connection(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+        task = asyncio.current_task()
+        if task is not None:
+            self._client_tasks.add(task)
         peer = writer.get_extra_info("peername")
         attacker_ip = peer[0] if peer else "unknown"
         logger.info("Honeypot %s connection from %s", self.service, attacker_ip)
@@ -54,6 +95,8 @@ class BaseListener:
                 await writer.wait_closed()
             except Exception:
                 pass
+            if task is not None:
+                self._client_tasks.discard(task)
 
     async def _interact(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, attacker_ip: str):
         raise NotImplementedError
@@ -243,7 +286,20 @@ class HoneypotManager:
                 except OSError as e:
                     logger.warning("Could not start %s honeypot: %s", listener.service, e)
 
-    async def stop_all(self):
+    async def stop_all(self) -> int:
+        """Stop every listener; return how many could NOT be stopped.
+
+        One listener failing must not leave the ones after it running, so every
+        listener is attempted. Listeners that failed stay in ``_listeners`` — they
+        are still this manager's to stop — and a later call retries them. Never
+        raises: callers run this during error handling and shutdown.
+        """
+        still_running: list[BaseListener] = []
         for listener in self._listeners:
-            await listener.stop()
-        self._listeners = []
+            try:
+                await listener.stop()
+            except Exception as exc:
+                logger.error("Could not stop %s honeypot: %r", getattr(listener, "service", "?"), exc)
+                still_running.append(listener)
+        self._listeners = still_running
+        return len(still_running)

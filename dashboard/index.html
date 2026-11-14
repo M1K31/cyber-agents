@@ -4,13 +4,17 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>AegisSIEM Security Dashboard</title>
-    <link rel="stylesheet" href="style.css">
+    <link rel="stylesheet" href="/ui/ecosystem-theme.css">
+    <link rel="stylesheet" href="/dashboard/style.css">
+    <script src="/ui/ecosystem-ui-controls.js"></script>
 </head>
 <body>
     <header>
         <div class="header-content">
             <h1>AegisSIEM Security Dashboard</h1>
-            <div class="system-status">
+            <div class="system-status" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+                <input id="totp-code" type="text" inputmode="numeric" maxlength="6" placeholder="6-digit TOTP" aria-label="6-digit TOTP step-up code" style="min-height:44px;padding:0 12px;border-radius:10px;border:1px solid rgba(128,128,128,0.35);background:transparent;color:inherit;font-size:14px;width:136px;">
+                <button id="btn-setup-totp" type="button" class="btn" style="min-height:44px;padding:0 14px;border-radius:10px;">Setup 2FA</button>
                 <span id="status-indicator" class="status-dot disconnected"></span>
                 <span id="status-text">Disconnected</span>
             </div>
@@ -18,6 +22,25 @@
     </header>
 
     <main>
+        <section style="margin-bottom:16px;" aria-label="Ecosystem Policy Controls">
+            <ecosystem-policy-bar id="policy-bar" view-mode="admin"></ecosystem-policy-bar>
+            <ecosystem-override-modal id="override-modal"></ecosystem-override-modal>
+            <!-- Revealed by app.js when /ui/ecosystem-ui-controls.js did not load, so a
+                 missing policy bar / Freeze control is never a silent blank. -->
+            <div id="ui-assets-missing" class="notice-banner" role="alert" hidden>
+                Shared ecosystem UI controls are not installed. Policy bar, Freeze and override controls are unavailable in this view. Run appEcosystem's scripts/install-local.sh, or set APP_ECOSYSTEM_PATH.
+            </div>
+        </section>
+
+        <!-- Stays on screen until the operator confirms: the secret is only ever
+             returned once, so a missed toast would leave them unable to finish setup. -->
+        <section id="totp-enroll-panel" class="enroll-panel" role="alertdialog" aria-labelledby="totp-enroll-title" aria-describedby="totp-enroll-help" hidden>
+            <h2 id="totp-enroll-title">Two-factor secret</h2>
+            <p id="totp-enroll-help">Shown once. Add it to your authenticator now.</p>
+            <code id="totp-enroll-secret" tabindex="0" aria-label="TOTP secret"></code>
+            <button id="btn-totp-enroll-done" type="button" class="btn btn-approve">I've saved it</button>
+        </section>
+
         <!-- Status Bar -->
         <section id="status-bar" class="status-bar">
             <div class="stat-card">
@@ -146,6 +169,6 @@
 
     <div id="toast-container"></div>
 
-    <script src="app.js"></script>
+    <script src="/dashboard/app.js"></script>
 </body>
 </html>

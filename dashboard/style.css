@@ -13,6 +13,9 @@
 
     /* Severity */
     --critical: #ef4444;
+    /* Fill under a white label (5.1:1). --critical itself is tuned as a text
+       colour on the dark page and is too light for that (3.8:1). */
+    --critical-fill: #da1b1b;
     --high: #f59e0b;
     --medium: #eab308;
     --low: #22c55e;
@@ -260,11 +263,11 @@ tbody tr:hover {
 .btn:active { transform: scale(0.97); }
 .btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
-.btn-block { background: var(--critical); color: #fff; }
+.btn-block { background: var(--critical-fill); color: #fff; }
 .btn-resolve { background: var(--low); color: #0a0e17; }
 .btn-unblock { background: var(--high); color: #0a0e17; }
 .btn-approve { background: var(--low); color: #0a0e17; }
-.btn-deny { background: var(--critical); color: #fff; }
+.btn-deny { background: var(--critical-fill); color: #fff; }
 
 .btn + .btn { margin-left: 0.4rem; }
 
@@ -344,6 +347,9 @@ tbody tr:hover {
 
 .toast.success { border-left: 3px solid var(--low); }
 .toast.error { border-left: 3px solid var(--critical); }
+/* Neither success nor failure: an action accepted but held (e.g. a block
+   awaiting operator approval). Amber to read as "attention / pending". */
+.toast.pending { border-left: 3px solid var(--high); }
 
 @keyframes slideIn {
     from { transform: translateX(100%); opacity: 0; }
@@ -390,3 +396,45 @@ footer {
 
     .stat-value { font-size: 1.5rem; }
 }
+
+/* ── TOTP enrolment secret (persistent until confirmed) ── */
+.enroll-panel {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 16px;
+    padding: 14px 16px;
+    background: var(--bg-card);
+    border: 1px solid var(--high);
+    border-left: 4px solid var(--high);
+    border-radius: var(--radius);
+}
+.enroll-panel[hidden] { display: none; }
+.enroll-panel h2 { font-size: 15px; margin: 0; }
+.enroll-panel p { margin: 0; color: var(--text-secondary); font-size: 13px; }
+.enroll-panel code {
+    font-family: var(--font-mono);
+    font-size: 15px;
+    letter-spacing: 0.08em;
+    padding: 8px 12px;
+    background: var(--bg-card-alt);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius);
+    color: var(--text-primary);
+    user-select: all;
+    overflow-wrap: anywhere;
+}
+.enroll-panel .btn { min-height: 44px; padding: 0 14px; }
+
+/* ── Shared UI controls unavailable ── */
+.notice-banner {
+    padding: 12px 16px;
+    background: var(--bg-card);
+    border: 1px solid var(--high);
+    border-left: 4px solid var(--high);
+    border-radius: var(--radius);
+    color: var(--text-primary);
+    font-size: 13px;
+}
+.notice-banner[hidden] { display: none; }

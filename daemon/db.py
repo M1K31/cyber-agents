@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -120,6 +120,7 @@ class Database:
             CREATE INDEX IF NOT EXISTS idx_profiles_ip ON attacker_profiles(ip);
             CREATE INDEX IF NOT EXISTS idx_profiles_subnet ON attacker_profiles(subnet_24);
             CREATE INDEX IF NOT EXISTS idx_honeypot_ip ON honeypot_events(attacker_ip);
+            CREATE INDEX IF NOT EXISTS idx_honeypot_timestamp ON honeypot_events(timestamp);
             CREATE INDEX IF NOT EXISTS idx_approvals_status ON approvals(status);
         """)
         self.conn.commit()
@@ -229,6 +230,20 @@ class Database:
         self.conn.execute(
             "UPDATE threats SET status = ? WHERE id = ?",
             (status.value, threat_id),
+        )
+        self.conn.commit()
+
+    def clear_auto_block_deadline(self, threat_id: int) -> None:
+        """Remove a threat's auto-block deadline.
+
+        Called when an operator denies (or the TTL expires on) a provisional
+        block: the threat goes back to ``open``, and without this its past
+        deadline would make ``get_open_threats_past_deadline`` hand it straight
+        back to the auto-block loop, overriding the decision.
+        """
+        self.conn.execute(
+            "UPDATE threats SET auto_block_at = NULL WHERE id = ?",
+            (threat_id,),
         )
         self.conn.commit()
 
@@ -376,6 +391,36 @@ class Database:
             "SELECT * FROM attacker_profiles WHERE subnet_24 = ?", (subnet_24,)
         ).fetchall()
         return [self._row_to_profile(r) for r in rows]
+
+    def count_profiles(self) -> int:
+        """Total attacker profiles (not capped by a page limit)."""
+        return int(self.conn.execute("SELECT COUNT(*) FROM attacker_profiles").fetchone()[0])
+
+    def count_active_profiles(self) -> int:
+        """Profiles that have escalated past OBSERVE (escalation_level >= 1), i.e.
+        'active' attackers — matching how the MCP status tool counts them."""
+        return int(
+            self.conn.execute(
+                "SELECT COUNT(*) FROM attacker_profiles WHERE escalation_level >= 1"
+            ).fetchone()[0]
+        )
+
+    def count_honeypot_events(self, hours: int = 24) -> int:
+        """Honeypot events within the last `hours` (default 24), no page limit.
+
+        Timestamps are stored as naive UTC (datetime.utcnow().isoformat()), so the
+        cutoff is computed the same way to keep the string comparison valid."""
+        now = datetime.utcnow()
+        since = (now - timedelta(hours=hours)).isoformat()
+        # Upper-bound at 'now' so events with a future timestamp (e.g. after a
+        # backward clock correction) are not counted in the 24h window.
+        upper = now.isoformat()
+        return int(
+            self.conn.execute(
+                "SELECT COUNT(*) FROM honeypot_events WHERE timestamp >= ? AND timestamp <= ?",
+                (since, upper),
+            ).fetchone()[0]
+        )
 
     def _row_to_profile(self, row: sqlite3.Row) -> AttackerProfile:
         return AttackerProfile(

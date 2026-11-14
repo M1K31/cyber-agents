@@ -15,6 +15,7 @@ Async event loop that:
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 import logging
 import os
@@ -28,8 +29,13 @@ from typing import Any, Optional
 import yaml
 import aiohttp
 from aiohttp import web
-from watchdog.events import FileSystemEventHandler, FileModifiedEvent
-from watchdog.observers import Observer
+try:
+    from watchdog.events import FileSystemEventHandler, FileModifiedEvent
+    from watchdog.observers import Observer
+except ImportError:  # pragma: no cover - optional when running UDP/API-only
+    FileSystemEventHandler = object  # type: ignore[assignment,misc]
+    FileModifiedEvent = object  # type: ignore[assignment,misc]
+    Observer = None  # type: ignore[assignment,misc]
 
 from .db import Database
 from .detection import DetectionEngine
@@ -151,19 +157,180 @@ class SyslogUDPProtocol(asyncio.DatagramProtocol):
 
 # ── HTTP API (aiohttp) ─────────────────────────────────────────────
 
-def create_api(db: Database, pipeline: ResponsePipeline) -> web.Application:
-    """Create the aiohttp web application with API routes."""
+def _duration_to_seconds(raw: Any) -> tuple[int | None, bool]:
+    if raw == "until_revoked":
+        return None, True
+    if isinstance(raw, (int, float)):
+        return max(60, int(raw)), False
+    s = str(raw or "30m").strip().lower()
+    mapping = {"15m": 900, "30m": 1800, "1h": 3600, "4h": 14400}
+    if s in mapping:
+        return mapping[s], False
+    if s.endswith("m") and s[:-1].isdigit():
+        return max(60, int(s[:-1]) * 60), False
+    if s.endswith("h") and s[:-1].isdigit():
+        return max(60, int(s[:-1]) * 3600), False
+    if s.isdigit():
+        return max(60, int(s)), False
+    return 1800, False
+
+
+def _is_loopback_request(request: web.Request) -> bool:
+    if request.headers.get("X-Forwarded-For"):
+        return False
+    remote = str(request.remote or "").strip()
+    if remote not in ("127.0.0.1", "::1", "localhost", ""):
+        return False
+    # Anti-DNS-rebinding: a rebound page still connects to loopback but sends the
+    # attacker's own domain as Host. Require the Host header to name loopback, so
+    # a rebinding page cannot reach the loopback-only bootstrap/Freeze routes.
+    host = (request.headers.get("Host") or "").strip().lower()
+    if host:
+        if host.startswith("["):
+            hostname = host[1:].split("]", 1)[0]
+        else:
+            hostname = host.rsplit(":", 1)[0]
+        if hostname not in ("127.0.0.1", "::1", "localhost"):
+            return False
+    return True
+
+
+def _is_cross_site_browser(request: web.Request) -> bool:
+    """True when a browser marks this as a cross-site request (CSRF).
+
+    Modern browsers send `Sec-Fetch-Site: cross-site|same-site` on forged cross-
+    origin requests and `same-origin`/`none` for first-party ones. Non-browser
+    callers (the HMAC peer, curl) send no such header, so this never blocks them.
+
+    Some browsers (e.g. Safari < 16.4) omit Fetch Metadata, so when it is absent
+    fall back to the Origin header: a cross-origin page's Origin is not our own
+    loopback host. A request with neither header is treated as non-browser.
+    """
+    site = request.headers.get("Sec-Fetch-Site")
+    if site:
+        return site not in ("same-origin", "none")
+    origin = request.headers.get("Origin")
+    if origin:
+        from urllib.parse import urlparse
+        try:
+            netloc = (urlparse(origin).netloc or "").lower()
+        except Exception:
+            return True
+        # Same-origin only when the Origin's full host:port equals our own Host
+        # header. Matching on hostname alone would let another loopback *port*
+        # (a different local app the attacker controls) pass as same-site.
+        host_header = (request.headers.get("Host") or "").strip().lower()
+        return not (netloc and host_header and netloc == host_header)
+    return False
+
+
+async def _read_json_optional(request: web.Request) -> dict[str, Any]:
+    if not request.can_read_body:
+        return {}
+    try:
+        raw = await request.text()
+        if not raw.strip():
+            return {}
+        parsed = json.loads(raw)
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        return {}
+
+
+# Principal attributed to a request authenticated by the shared ecosystem HMAC
+# secret. It identifies "some trusted peer", never a human operator.
+_PEER_PRINCIPAL = "ecosystem-peer"
+
+
+def create_api(db: Database, pipeline: ResponsePipeline, *, step_up_auth: Any = None) -> web.Application:
+    """Create the aiohttp web application with API routes, step-up auth, and policy controls."""
+    from .ecosystem_bridge import (
+        _ensure_ecosystem_paths,
+        get_step_up_auth,
+        resolve_ui_asset_path,
+    )
+
+    _ensure_ecosystem_paths()
+    from ecosystem_auth.tokens import NonceStore, get_ecosystem_secret, verify_request
+
     app = web.Application()
+    nonce_store = NonceStore(ttl_seconds=600)
+    step_up = step_up_auth or get_step_up_auth()
+    policy_engine = pipeline.policy_engine
+    # Non-empty once the legacy-authenticator warning has been logged for this app.
+    _legacy_bootstrap_warned: list[bool] = []
+
+    def _verify_hmac_peer(request: web.Request, body: dict[str, Any] | None) -> bool:
+        sig = request.headers.get("X-Ecosystem-Signature")
+        ts = request.headers.get("X-Ecosystem-Timestamp")
+        nonce = request.headers.get("X-Ecosystem-Nonce")
+        if not (sig and ts and nonce):
+            return False
+        try:
+            secret = get_ecosystem_secret()
+        except Exception:
+            return False
+        return verify_request(
+            method=request.method,
+            url=str(request.rel_url),
+            secret=secret,
+            signature=sig,
+            timestamp=ts,
+            nonce=nonce,
+            body=body if body else None,
+            nonce_store=nonce_store,
+        )
+
+    def _authenticate_privileged(
+        request: web.Request,
+        body: dict[str, Any],
+        *,
+        required_scope: str = "policy_admin",
+    ) -> tuple[str, str, str | None] | None:
+        """Verify either HMAC peer signature OR operator step-up (TOTP / Passkey / Device-Key)."""
+        if _verify_hmac_peer(request, body):
+            # The signature proves possession of the shared ecosystem secret, not a
+            # specific peer, so attribute to a fixed trusted-peer principal rather
+            # than the spoofable client-supplied X-Ecosystem-Key-Id header.
+            return (_PEER_PRINCIPAL, "device_key", None)
+
+        token = (
+            str(body.get("step_up_token") or request.headers.get("X-Ecosystem-Step-Up") or "").strip()
+        )
+        if token:
+            claims = step_up.verify_step_up_token(token, required_scope=required_scope)
+            if claims:
+                return (str(claims["sub"]), str(claims["amr"]), token)
+
+        operator_id = str(body.get("operator_id") or "admin").strip()
+        totp_code = str(body.get("totp_code") or body.get("step_up_credential") or "").strip()
+        if totp_code and len(totp_code) == 6 and totp_code.isdigit():
+            issued = step_up.verify_totp_and_issue_token(operator_id, totp_code, scope=required_scope)
+            if issued:
+                return (operator_id, "totp", str(issued["step_up_token"]))
+        return None
 
     async def get_status(request: web.Request) -> web.Response:
         aggregated = db.get_threats_aggregated()
         blocked = db.get_blocked_ips()
-        profiles = db.get_profiles(limit=0)
+        # True totals from the DB, not len() of a 1000-row page, and the honeypot
+        # figure is an actual 24h window rather than "up to 1000 events ever".
+        profile_count = db.count_profiles()
+        active_profiles = db.count_active_profiles()
+        honeypot_events_24h = db.count_honeypot_events(hours=24)
+        pending_approvals = db.get_pending_approvals()
+        by_status = aggregated.get("by_status", {}) if isinstance(aggregated, dict) else {}
         return web.json_response({
             "status": "running",
             "threats": aggregated,
+            "open_threats": by_status.get("open", 0),
             "blocked_count": len(blocked),
-            "profile_count": len(profiles) if isinstance(profiles, list) else 0,
+            "blocked_ips": len(blocked),
+            "profile_count": profile_count,
+            "active_profiles": active_profiles,
+            "honeypot_events_24h": honeypot_events_24h,
+            "pending_approvals": len(pending_approvals),
+            "policy": policy_engine.export_state(),
             "timestamp": datetime.utcnow().isoformat(),
         })
 
@@ -174,13 +341,43 @@ def create_api(db: Database, pipeline: ResponsePipeline) -> web.Application:
         return web.json_response([t.model_dump(mode="json") for t in threats])
 
     async def post_block_threat(request: web.Request) -> web.Response:
+        body = await _read_json_optional(request)
+        auth_info = _authenticate_privileged(request, body)
+        if auth_info is None:
+            return web.json_response(
+                {"status": "unauthorized", "detail": "HMAC service signature or TOTP step-up required"},
+                status=401,
+            )
         threat_id = int(request.match_info["id"])
-        success = await pipeline.block_threat(threat_id)
-        if success:
+        result = await pipeline.block_threat(threat_id)
+        if result == "blocked":
             return web.json_response({"status": "blocked", "threat_id": threat_id})
+        if result == "pending_approval":
+            # Not a failure: the block is held for operator approval. 202 so the
+            # dashboard shows "pending" rather than reporting an error and retrying.
+            return web.json_response(
+                {"status": "pending_approval", "threat_id": threat_id,
+                 "detail": "Block requires operator approval; a checkpoint was created"},
+                status=202,
+            )
+        # Freeze takes precedence over the generic denial: when Freeze is active the
+        # PolicyEngine returns "denied", but a 409 "frozen" is the accurate response.
+        if policy_engine.export_state().get("frozen"):
+            return web.json_response(
+                {"status": "frozen", "detail": "Ecosystem Freeze is active; mutating blocks are suspended"},
+                status=409,
+            )
+        if result == "denied":
+            return web.json_response(
+                {"status": "denied", "threat_id": threat_id, "detail": "Blocked by PolicyEngine"},
+                status=403,
+            )
         return web.json_response({"status": "failed", "threat_id": threat_id}, status=500)
 
     async def post_resolve_threat(request: web.Request) -> web.Response:
+        body = await _read_json_optional(request)
+        if not _is_loopback_request(request) and _authenticate_privileged(request, body) is None:
+            return web.json_response({"status": "unauthorized"}, status=401)
         threat_id = int(request.match_info["id"])
         db.update_threat_status(threat_id, ThreatStatus.resolved)
         return web.json_response({"status": "resolved", "threat_id": threat_id})
@@ -195,23 +392,365 @@ def create_api(db: Database, pipeline: ResponsePipeline) -> web.Application:
         events = db.get_honeypot_events(limit=limit)
         return web.json_response([e.model_dump(mode="json") for e in events])
 
+    async def get_approvals(request: web.Request) -> web.Response:
+        pipeline.approval_manager.expire_due()
+        pending = db.get_pending_approvals()
+        profiles_by_id = {p.id: p for p in db.get_profiles(limit=500) if p.id is not None}
+        payload = []
+        for a in pending:
+            prof = profiles_by_id.get(a.profile_id)
+            payload.append({
+                "id": a.id,
+                "profile_id": a.profile_id,
+                "action": a.action,
+                "checkpoint": a.action,
+                "status": a.status,
+                "reason": a.summary,
+                "summary": a.summary,
+                "created_at": a.created_at.isoformat(),
+                "profile_summary": {
+                    "ip": prof.ip,
+                    "escalation_level": getattr(prof.escalation_level, "value", prof.escalation_level),
+                    "total_attempts": prof.total_attempts,
+                    "country": prof.country,
+                } if prof else {},
+            })
+        return web.json_response(payload)
+
     async def post_approve(request: web.Request) -> web.Response:
+        body = await _read_json_optional(request)
+        auth_info = _authenticate_privileged(request, body)
+        if auth_info is None:
+            return web.json_response(
+                {"status": "unauthorized", "detail": "Step-up TOTP/Passkey or signed peer auth required to approve"},
+                status=401,
+            )
+        operator_id, auth_method, token = auth_info
         approval_id = int(request.match_info["id"])
-        success = pipeline.approval_manager.approve(approval_id)
+        success = pipeline.approval_manager.approve(
+            approval_id,
+            step_up_token=token,
+            resolved_by=operator_id,
+            auth_method=auth_method,
+            note=str(body.get("note") or ""),
+        )
         if success:
             return web.json_response({"status": "approved", "id": approval_id})
+        if policy_engine.export_state().get("frozen"):
+            return web.json_response(
+                {"status": "frozen", "detail": "Cannot approve actions while Ecosystem Freeze is active"},
+                status=409,
+            )
         return web.json_response({"status": "not_found_or_not_pending"}, status=404)
 
     async def post_deny(request: web.Request) -> web.Response:
+        body = await _read_json_optional(request)
+        auth_info = _authenticate_privileged(request, body)
+        if auth_info is None:
+            return web.json_response(
+                {"status": "unauthorized", "detail": "Step-up TOTP/Passkey or signed peer auth required to deny"},
+                status=401,
+            )
+        operator_id, auth_method, token = auth_info
         approval_id = int(request.match_info["id"])
-        success = pipeline.approval_manager.deny(approval_id)
+        success = pipeline.approval_manager.deny(
+            approval_id,
+            step_up_token=token,
+            resolved_by=operator_id,
+            auth_method=auth_method,
+            note=str(body.get("note") or ""),
+        )
         if success:
             return web.json_response({"status": "denied", "id": approval_id})
         return web.json_response({"status": "not_found_or_not_pending"}, status=404)
 
     async def get_blocked(request: web.Request) -> web.Response:
         blocked = db.get_blocked_ips()
-        return web.json_response([b.model_dump(mode="json") for b in blocked])
+        out = []
+        for b in blocked:
+            d = b.model_dump(mode="json")
+            d.setdefault("router", b.router_name)
+            out.append(d)
+        return web.json_response(out)
+
+    async def post_unblock(request: web.Request) -> web.Response:
+        body = await _read_json_optional(request)
+        auth_info = _authenticate_privileged(request, body)
+        if auth_info is None:
+            return web.json_response(
+                {"status": "unauthorized", "detail": "Step-up TOTP/Passkey or signed peer auth required to unblock"},
+                status=401,
+            )
+        raw_id = request.match_info["id"]
+        target_ip = raw_id
+        if raw_id.isdigit():
+            for b in db.get_blocked_ips(active_only=False):
+                if b.id == int(raw_id):
+                    target_ip = b.ip
+                    break
+        # Never pass an unvalidated path segment to the router SSH unblock: a
+        # value with shell metacharacters would execute on the router's account.
+        # Only a well-formed, unscoped IP in canonical form is ever forwarded
+        # (a scoped IPv6 such as fe80::1%eth0 would carry a '%scope' suffix).
+        try:
+            _addr = ipaddress.ip_address(target_ip)
+        except ValueError:
+            return web.json_response(
+                {"status": "error", "detail": "Invalid IP address"}, status=400
+            )
+        if getattr(_addr, "scope_id", None):
+            return web.json_response(
+                {"status": "error", "detail": "Scoped IP addresses are not accepted"}, status=400
+            )
+        # The DB row is matched by the string it was stored under (which may not
+        # be in canonical form); the router only ever sees the validated address.
+        stored_ip = target_ip
+        target_ip = _addr.compressed
+        if not await pipeline.unblock(target_ip, db_ip=stored_ip):
+            return web.json_response(
+                {
+                    "status": "error",
+                    "detail": "Router did not confirm removal; IP remains blocked",
+                    "ip": target_ip,
+                },
+                status=502,
+            )
+        return web.json_response({"status": "unblocked", "ip": target_ip})
+
+    # ── Policy & Step-Up Routes ─────────────────────────────────────
+
+    async def get_policy_state(request: web.Request) -> web.Response:
+        return web.json_response(policy_engine.export_state())
+
+    async def post_policy_freeze(request: web.Request) -> web.Response:
+        body = await _read_json_optional(request)
+        # Reject cross-site browser requests so a malicious page cannot trigger a
+        # Freeze (DoS) via a simple cross-origin POST to the loopback endpoint.
+        if _is_cross_site_browser(request):
+            return web.json_response({"detail": "Cross-site request rejected"}, status=403)
+        # Allow loopback, an HMAC peer, OR an authenticated operator step-up so a
+        # remote operator with a valid TOTP/passkey can Freeze (previously remote
+        # operators got 401 even with a valid factor).
+        auth_info = _authenticate_privileged(request, body)
+        if not _is_loopback_request(request) and auth_info is None:
+            return web.json_response({"detail": "Authentication required for remote Freeze"}, status=401)
+        # Attribute the audit record to the authenticated identity, never a
+        # client-supplied initiated_by (which would let a caller spoof attribution).
+        # Only an unauthenticated loopback caller falls back to a fixed label.
+        initiated_by = auth_info[0] if auth_info is not None else "loopback-operator"
+        state = policy_engine.freeze(
+            initiated_by=initiated_by,
+            channel=str(body.get("channel") or "dashboard"),
+            reason=str(body.get("reason") or "Emergency Freeze triggered from AegisSIEM Daemon"),
+            acknowledged_devices=["aegissiem_daemon"],
+        )
+        return web.json_response(state)
+
+    async def post_policy_resume(request: web.Request) -> web.Response:
+        body = await _read_json_optional(request)
+        auth_info = _authenticate_privileged(request, body)
+        if auth_info is None:
+            return web.json_response(
+                {"detail": "Valid TOTP 2FA, Passkey, or Device-Key step-up required to Resume from Freeze"},
+                status=401,
+            )
+        operator_id, auth_method, _ = auth_info
+        state = policy_engine.resume(
+            operator_id=operator_id,
+            auth_method=auth_method,
+            reason=str(body.get("reason") or "Operator resumed normal operation"),
+        )
+        return web.json_response(state)
+
+    async def post_policy_restrictions_off(request: web.Request) -> web.Response:
+        body = await _read_json_optional(request)
+        auth_info = _authenticate_privileged(request, body)
+        if auth_info is None:
+            return web.json_response(
+                {"detail": "Valid TOTP 2FA, Passkey, or Device-Key step-up required for Restrictions: Off"},
+                status=401,
+            )
+        operator_id, auth_method, _ = auth_info
+        scope = body.get("scope") if isinstance(body.get("scope"), dict) else {}
+
+        def _scope_list(key: str, default: list[str]) -> list[str] | None:
+            # A scope field must be a JSON array. A bare string would otherwise be
+            # list()-expanded into individual characters, silently producing a
+            # grant scoped to one-letter app/device names.
+            val = scope.get(key)
+            if val is None:
+                return default
+            if not isinstance(val, list) or not all(isinstance(x, str) for x in val):
+                return None
+            return val
+
+        apps = _scope_list("apps", ["aegissiem_daemon"])
+        devices = _scope_list("devices", ["local"])
+        action_classes = _scope_list("action_classes", ["investigate", "contain"])
+        if apps is None or devices is None or action_classes is None:
+            return web.json_response(
+                {"detail": "scope.apps / scope.devices / scope.action_classes must be arrays of strings"},
+                status=400,
+            )
+        dur_sec, until_rev = _duration_to_seconds(
+            "until_revoked" if body.get("until_revoked") else body.get("duration", "30m")
+        )
+        try:
+            state = policy_engine.activate_restrictions_off(
+                issued_by=operator_id,
+                auth_method=auth_method,
+                reason=str(body.get("reason") or ""),
+                apps=apps,
+                devices=devices,
+                action_classes=action_classes,
+                duration_seconds=dur_sec,
+                until_revoked=until_rev,
+                applied_devices=["aegissiem_daemon"],
+            )
+            return web.json_response(state)
+        except (ValueError, PermissionError) as exc:
+            return web.json_response({"detail": str(exc)}, status=400)
+
+    async def post_policy_restrictions_on(request: web.Request) -> web.Response:
+        body = await _read_json_optional(request)
+        if _is_cross_site_browser(request):
+            return web.json_response({"detail": "Cross-site request rejected"}, status=403)
+        if not _is_loopback_request(request) and _authenticate_privileged(request, body) is None:
+            return web.json_response({"detail": "Authentication required"}, status=401)
+        state = policy_engine.restore_restrictions_on(
+            actor=str(body.get("actor") or "cyber-agents-operator"),
+            reason=str(body.get("reason") or "Restored conservative policy"),
+        )
+        return web.json_response(state)
+
+    async def post_totp_enroll(request: web.Request) -> web.Response:
+        if not _is_loopback_request(request):
+            return web.json_response({"detail": "TOTP enrollment restricted to loopback"}, status=403)
+        body = await _read_json_optional(request)
+        operator_id = str(body.get("operator_id") or "admin").strip()
+        if not operator_id or operator_id == _PEER_PRINCIPAL:
+            # Reserved: an operator with the peer's principal name would be
+            # indistinguishable from the signed peer in authorization and audit.
+            return web.json_response({"detail": "Invalid operator_id"}, status=400)
+        existing = step_up.has_enrolled_factors(operator_id)
+        # Only the very first factor on a fresh store is loopback-only bootstrap.
+        # Once bootstrapped, EVERY enrollment requires current step-up, not merely
+        # loopback: rotating any operator, enrolling a new operator, or adding a
+        # TOTP factor to an operator that already holds a passkey/device key.
+        _any_enrolled = getattr(step_up, "has_any_enrolled_operator", None)
+        legacy_authenticator = not callable(_any_enrolled)
+        if legacy_authenticator:
+            # An ecosystem-policy without the store-wide query cannot prove the
+            # store is empty: probing only the target and "admin" misses any other
+            # enrolled operator, and would hand an unauthenticated loopback caller
+            # a fresh "admin" secret. Fail closed — never treat this as first boot.
+            if not _legacy_bootstrap_warned:
+                _legacy_bootstrap_warned.append(True)
+                logger.warning(
+                    "ecosystem-policy lacks StepUpAuthenticator.has_any_enrolled_operator; "
+                    "unauthenticated first-boot TOTP enrolment is disabled until appEcosystem is upgraded"
+                )
+            first_boot = False
+        else:
+            first_boot = not _any_enrolled()
+
+        if not first_boot:
+            auth_info = _authenticate_privileged(request, body)
+            if auth_info is None:
+                if existing.get("totp"):
+                    return web.json_response(
+                        {"detail": "TOTP already enrolled; provide current step-up to rotate"},
+                        status=401,
+                    )
+                detail = "Enrollment requires current step-up authorization once the system is bootstrapped"
+                if legacy_authenticator:
+                    detail = (
+                        "Cannot verify that the step-up store is empty: this ecosystem-policy "
+                        "build lacks has_any_enrolled_operator. Upgrade appEcosystem, or "
+                        "authenticate with an existing step-up factor."
+                    )
+                return web.json_response({"detail": detail}, status=403)
+
+            # Being authenticated is not enough.
+            principal = auth_info[0]
+            if principal == _PEER_PRINCIPAL:
+                # The shared-secret peer is not a human operator and gets no say
+                # over human step-up factors: it may neither rotate one nor mint a
+                # new operator (which it could then use to create "admin" and
+                # inherit the recovery privilege below).
+                return web.json_response(
+                    {"detail": "Step-up factors can only be enrolled by an operator with step-up, not a signed peer"},
+                    status=403,
+                )
+            # A factor may only be replaced by its owner, or by "admin" as the
+            # recovery path. Otherwise any operator could rotate someone else's
+            # TOTP, receive the new secret, and lock them out.
+            if any(existing.values()) and principal not in (operator_id, "admin"):
+                return web.json_response(
+                    {"detail": "Only the operator themself or admin may rotate an enrolled factor"},
+                    status=403,
+                )
+        enrolled = step_up.enroll_totp(operator_id, issuer="AegisSIEM-Daemon")
+        return web.json_response(enrolled)
+
+    async def post_totp_verify(request: web.Request) -> web.Response:
+        body = await _read_json_optional(request)
+        operator_id = str(body.get("operator_id") or "admin").strip()
+        code = str(body.get("totp_code") or "").strip()
+        issued = step_up.verify_totp_and_issue_token(operator_id, code)
+        if not issued:
+            return web.json_response({"detail": "Invalid or replayed TOTP code"}, status=401)
+        return web.json_response(issued)
+
+    async def post_ecosystem_event(request: web.Request) -> web.Response:
+        """Receive mesh events from the ecosystem hub.
+
+        Previously the hub posted here (e.g. to propagate an emergency Freeze) but
+        the daemon had no route, so the hub marked it unreachable and the response
+        pipeline stayed unfrozen. Accept hub-signed peers or loopback, and apply a
+        mesh Freeze. Resume is intentionally NOT auto-applied — leaving Freeze
+        requires operator step-up via /api/policy/resume.
+        """
+        body = await _read_json_optional(request)
+        # A malicious page could POST {"type":"policy.freeze"} to this loopback
+        # route; reject cross-site browser requests so only genuine peers/loopback
+        # tools (which carry no browser Origin/Fetch-Metadata) can deliver events.
+        if _is_cross_site_browser(request):
+            return web.json_response({"detail": "Cross-site request rejected"}, status=403)
+        if not _is_loopback_request(request) and not _verify_hmac_peer(request, body):
+            return web.json_response({"detail": "Authentication required for mesh events"}, status=401)
+        etype = str(body.get("type") or body.get("event_type") or "")
+        data = body.get("data") if isinstance(body.get("data"), dict) else body
+        if etype in ("policy.freeze", "ecosystem.freeze", "containment.freeze"):
+            policy_engine.freeze(
+                initiated_by=str(data.get("initiated_by") or "ecosystem-hub"),
+                channel="ecosystem_mesh",
+                reason=str(data.get("reason") or "Mesh Freeze propagated from the ecosystem hub"),
+                acknowledged_devices=["aegissiem_daemon"],
+            )
+            logger.warning("Applied mesh Freeze from hub event '%s'", etype)
+            return web.json_response({"status": "frozen"})
+        logger.debug("Ignoring non-actionable mesh event '%s'", etype)
+        return web.json_response({"status": "ok"})
+
+    async def serve_ui_asset(request: web.Request) -> web.StreamResponse:
+        name = request.match_info["name"]
+        asset = resolve_ui_asset_path(name)
+        if asset is None:
+            return web.Response(status=404, text="UI asset not found")
+        ctype = "application/javascript" if name.endswith(".js") else "text/css"
+        return web.FileResponse(asset, headers={"Content-Type": ctype})
+
+    async def serve_ui_font(request: web.Request) -> web.StreamResponse:
+        name = request.match_info["name"]
+        asset = resolve_ui_asset_path(f"fonts/{name}")
+        if asset is None:
+            return web.Response(status=404, text="Font asset not found")
+        return web.FileResponse(asset, headers={"Content-Type": "font/woff2"})
+
+    async def serve_dashboard_index(request: web.Request) -> web.StreamResponse:
+        dash_dir = Path(__file__).resolve().parent.parent / "dashboard"
+        return web.FileResponse(dash_dir / "index.html")
 
     async def post_analyze(request: web.Request) -> web.Response:
         """LLM-powered security analysis via Ollama.
@@ -292,9 +831,40 @@ def create_api(db: Database, pipeline: ResponsePipeline) -> web.Application:
     app.router.add_post("/api/threats/{id}/resolve", post_resolve_threat)
     app.router.add_get("/api/profiles", get_profiles)
     app.router.add_get("/api/honeypot/events", get_honeypot_events)
+    app.router.add_get("/api/approvals", get_approvals)
     app.router.add_post("/api/approvals/{id}/approve", post_approve)
     app.router.add_post("/api/approvals/{id}/deny", post_deny)
     app.router.add_get("/api/blocked", get_blocked)
+    app.router.add_post("/api/blocked/{id}/unblock", post_unblock)
+    app.router.add_get("/api/policy/state", get_policy_state)
+    app.router.add_post("/api/policy/freeze", post_policy_freeze)
+    app.router.add_post("/api/policy/resume", post_policy_resume)
+    app.router.add_post("/api/policy/restrictions/off", post_policy_restrictions_off)
+    app.router.add_post("/api/policy/restrictions/on", post_policy_restrictions_on)
+    app.router.add_post("/api/auth/step-up/totp/enroll", post_totp_enroll)
+    app.router.add_post("/api/auth/step-up/totp/verify", post_totp_verify)
+    app.router.add_post("/ecosystem/events", post_ecosystem_event)
+    app.router.add_get("/ui/{name}", serve_ui_asset)
+    app.router.add_get("/ui/fonts/{name}", serve_ui_font)
+    dash_dir = Path(__file__).resolve().parent.parent / "dashboard"
+
+    async def redirect_to_dashboard(request: web.Request) -> web.Response:
+        raise web.HTTPFound("/dashboard/")
+
+    async def serve_dashboard_style(request: web.Request) -> web.StreamResponse:
+        return web.FileResponse(dash_dir / "style.css")
+
+    async def serve_dashboard_script(request: web.Request) -> web.StreamResponse:
+        return web.FileResponse(dash_dir / "app.js")
+
+    app.router.add_get("/", redirect_to_dashboard)
+    app.router.add_get("/dashboard", redirect_to_dashboard)
+    app.router.add_get("/dashboard/", serve_dashboard_index)
+    app.router.add_get("/favicon.ico", lambda req: web.Response(status=204))
+    app.router.add_get("/style.css", serve_dashboard_style)
+    app.router.add_get("/app.js", serve_dashboard_script)
+    if dash_dir.is_dir():
+        app.router.add_static("/dashboard/", dash_dir)
     app.router.add_post("/api/analyze", post_analyze)
 
     return app
@@ -417,6 +987,14 @@ async def run_daemon():
     await site.start()
     logger.info("HTTP API listening on port %d", api_port)
 
+    # 8b. Start ecosystem HubRuntime bridge (non-fatal standalone fallback)
+    try:
+        from .ecosystem_bridge import start_daemon_hub
+
+        await start_daemon_hub(api_port)
+    except Exception as exc:
+        logger.warning("Ecosystem HubRuntime not started (standalone mode): %s", exc)
+
     # Handle shutdown
     stop_event = asyncio.Event()
 
@@ -432,6 +1010,12 @@ async def run_daemon():
 
     # Cleanup
     logger.info("Shutting down...")
+    try:
+        from .ecosystem_bridge import stop_daemon_hub
+
+        await stop_daemon_hub()
+    except Exception:
+        pass
     auto_block_task.cancel()
     summary_task.cancel()
 
@@ -440,7 +1024,9 @@ async def run_daemon():
         observer.join()
 
     await runner.cleanup()
-    await honeypot_manager.stop_all()
+    still_running = await honeypot_manager.stop_all()
+    if still_running:
+        logger.error("%d honeypot listener(s) could not be stopped during shutdown", still_running)
     db.close()
     logger.info("AegisSIEM daemon stopped.")
 

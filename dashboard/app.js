@@ -1,7 +1,7 @@
 // AegisSIEM Security Dashboard - Client Application
 // All dynamic content is sanitized via escapeHtml() before DOM insertion.
 
-const API_BASE = 'http://localhost:8088';
+const API_BASE = (typeof window !== 'undefined' && window.location && window.location.origin) ? window.location.origin : 'http://localhost:8088';
 const POLL_INTERVAL = 10000;
 
 let pollTimer = null;
@@ -119,9 +119,49 @@ async function apiGet(path) {
     return resp.json();
 }
 
-async function apiPost(path) {
-    var resp = await fetch(API_BASE + path, { method: 'POST' });
-    if (!resp.ok) throw new Error('POST ' + path + ': ' + resp.status);
+function currentTotpPayload(extra) {
+    var payload = Object.assign({}, extra || {});
+    var input = document.getElementById('totp-code');
+    if (input && input.value && input.value.trim()) {
+        payload.totp_code = input.value.trim();
+    }
+    return payload;
+}
+
+// A TOTP code is single-use. Clear it once the request that carried it has
+// succeeded — but only if the field still holds THAT code: the operator may
+// already have typed the next one while the request was in flight.
+function clearTotpInput(submittedCode) {
+    var input = document.getElementById('totp-code');
+    if (input && submittedCode && input.value.trim() === submittedCode) {
+        input.value = '';
+    }
+}
+
+// POST with the TOTP currently in the field (if any) merged into `extra`, and
+// clear that code on success.
+async function postWithTotp(path, extra) {
+    var payload = currentTotpPayload(extra);
+    var result = await apiPost(path, payload);
+    clearTotpInput(payload.totp_code);
+    return result;
+}
+
+async function apiPost(path, body) {
+    var payload = body !== undefined ? body : currentTotpPayload();
+    var resp = await fetch(API_BASE + path, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+    });
+    if (!resp.ok) {
+        var detail = '';
+        try {
+            var errBody = await resp.json();
+            detail = errBody.detail || errBody.status || '';
+        } catch (_) {}
+        throw new Error('POST ' + path + ': ' + resp.status + (detail ? ' (' + detail + ')' : ''));
+    }
     return resp.json();
 }
 
@@ -284,8 +324,18 @@ function renderApprovals(approvals) {
 
 async function actionBlock(id) {
     try {
-        await apiPost('/api/threats/' + id + '/block');
-        showToast('Threat blocked successfully');
+        var result = await postWithTotp('/api/threats/' + id + '/block');
+        // A block that hits the approval gate returns 202 pending_approval
+        // (not an error, so apiPost does not throw). Report it as pending —
+        // the threat is NOT yet contained — rather than "blocked successfully".
+        if (result && result.status === 'pending_approval') {
+            showToast(
+                result.detail || 'Block requires operator approval; see Pending Approvals.',
+                'pending'
+            );
+        } else {
+            showToast('Threat blocked successfully');
+        }
         refreshAll();
     } catch (err) {
         showToast('Block failed: ' + err.message, 'error');
@@ -294,7 +344,7 @@ async function actionBlock(id) {
 
 async function actionResolve(id) {
     try {
-        await apiPost('/api/threats/' + id + '/resolve');
+        await postWithTotp('/api/threats/' + id + '/resolve');
         showToast('Threat resolved');
         refreshAll();
     } catch (err) {
@@ -304,7 +354,7 @@ async function actionResolve(id) {
 
 async function actionUnblock(id) {
     try {
-        await apiPost('/api/blocked/' + id + '/unblock');
+        await postWithTotp('/api/blocked/' + id + '/unblock');
         showToast('IP unblocked');
         refreshAll();
     } catch (err) {
@@ -314,7 +364,7 @@ async function actionUnblock(id) {
 
 async function actionApprove(id) {
     try {
-        await apiPost('/api/approvals/' + id + '/approve');
+        await postWithTotp('/api/approvals/' + id + '/approve');
         showToast('Approval granted');
         refreshAll();
     } catch (err) {
@@ -324,12 +374,137 @@ async function actionApprove(id) {
 
 async function actionDeny(id) {
     try {
-        await apiPost('/api/approvals/' + id + '/deny');
+        await postWithTotp('/api/approvals/' + id + '/deny');
         showToast('Action denied');
         refreshAll();
     } catch (err) {
         showToast('Deny failed: ' + err.message, 'error');
     }
+}
+
+// ── Policy Bar & Step-Up Controls ──
+
+function initPolicyControls() {
+    var bar = document.getElementById('policy-bar');
+    var modal = document.getElementById('override-modal');
+    var btnSetup = document.getElementById('btn-setup-totp');
+
+    if (modal) {
+        modal.availableApps = ['aegissiem_daemon'];
+    }
+    if (bar && modal) {
+        bar.addEventListener('ecosystem-manage-restrictions', function() { modal.open(); });
+        bar.addEventListener('ecosystem-restore-restrictions', async function() {
+            try {
+                await postWithTotp('/api/policy/restrictions/on', {});
+                showToast('Conservative Restrictions: On restored');
+                refreshAll();
+            } catch (err) {
+                showToast('Restore failed: ' + err.message, 'error');
+            }
+        });
+        bar.addEventListener('ecosystem-freeze-request', async function() {
+            try {
+                // Sent even with an empty TOTP field: on the daemon host itself no
+                // step-up is needed. From another machine the daemon answers 401.
+                await postWithTotp('/api/policy/freeze', {
+                    initiated_by: 'cyber-agents-dashboard',
+                    channel: 'dashboard',
+                    reason: 'Emergency Freeze triggered from AegisSIEM Daemon Dashboard'
+                });
+                showToast('Ecosystem Freeze engaged');
+                refreshAll();
+            } catch (err) {
+                showToast('Freeze NOT engaged (a 6-digit TOTP code is required when not on the daemon host): ' + err.message, 'error');
+            }
+        });
+        bar.addEventListener('ecosystem-resume-request', async function() {
+            try {
+                await postWithTotp('/api/policy/resume', {
+                    reason: 'Operator resumed from AegisSIEM Daemon Dashboard'
+                });
+                showToast('Normal policy operation resumed');
+                refreshAll();
+            } catch (err) {
+                showToast('Resume failed (enter 6-digit TOTP): ' + err.message, 'error');
+            }
+        });
+        modal.addEventListener('ecosystem-override-submit', async function(ev) {
+            var d = ev.detail || {};
+            try {
+                // Field names follow validateOverrideForm's payload
+                // (duration_id, step_up.{method,credential}).
+                var stepUp = d.step_up || {};
+                var body = {
+                    scope: d.scope,
+                    duration: d.duration_id,
+                    until_revoked: d.duration_id === 'until_revoked',
+                    reason: d.reason
+                };
+                if (stepUp.method === 'totp') {
+                    body.totp_code = stepUp.credential;
+                } else if (stepUp.credential) {
+                    body.step_up_token = stepUp.credential;
+                }
+                await apiPost('/api/policy/restrictions/off', body);
+                showToast('Signed scoped Restrictions: Off grant active');
+                refreshAll();
+            } catch (err) {
+                showToast('Override failed: ' + err.message, 'error');
+            }
+        });
+    }
+    if (btnSetup) {
+        btnSetup.addEventListener('click', async function() {
+            try {
+                var res = await postWithTotp('/api/auth/step-up/totp/enroll', { operator_id: 'admin' });
+                showEnrollSecret(res.secret);
+                res = null;
+            } catch (err) {
+                showToast('2FA setup: ' + err.message, 'error');
+            }
+        });
+    }
+}
+
+// The policy bar, Freeze button and override modal come from the shared
+// ecosystem bundle (/ui/ecosystem-ui-controls.js). If it did not load, the
+// custom elements never upgrade and render nothing — say so instead of leaving
+// an operator to assume there is simply nothing to show.
+function initUiAssetsNotice() {
+    var notice = document.getElementById('ui-assets-missing');
+    if (notice && !window.EcosystemUIControls) {
+        notice.hidden = false;
+    }
+}
+
+// The enrolment secret is returned exactly once. Keep it on screen until the
+// operator says they have stored it; it lives only in this DOM node — never in
+// a toast, a log, storage or a lingering variable.
+function showEnrollSecret(secret) {
+    var panel = document.getElementById('totp-enroll-panel');
+    var code = document.getElementById('totp-enroll-secret');
+    if (!panel || !code) {
+        showToast('2FA enrolled, but the secret panel is missing from this page; re-run setup after reloading.', 'error');
+        return;
+    }
+    code.textContent = secret;
+    panel.hidden = false;
+    code.focus();
+}
+
+function dismissEnrollSecret() {
+    var panel = document.getElementById('totp-enroll-panel');
+    var code = document.getElementById('totp-enroll-secret');
+    if (code) code.textContent = '';
+    if (panel) panel.hidden = true;
+}
+
+function initEnrollPanel() {
+    var done = document.getElementById('btn-totp-enroll-done');
+    if (done) done.addEventListener('click', dismissEnrollSecret);
+    // Do not leave the secret in a page that is being hidden or cached.
+    window.addEventListener('pagehide', dismissEnrollSecret);
 }
 
 // ── Polling ──
@@ -342,7 +517,8 @@ async function refreshAll() {
             apiGet('/api/blocked'),
             apiGet('/api/profiles'),
             apiGet('/api/honeypot/events'),
-            apiGet('/api/approvals')
+            apiGet('/api/approvals'),
+            apiGet('/api/policy/state')
         ]);
 
         setConnected(true);
@@ -353,6 +529,11 @@ async function refreshAll() {
         renderHoneypot(results[4]);
         renderApprovals(results[5]);
 
+        var bar = document.getElementById('policy-bar');
+        if (bar && results[6]) {
+            bar.policyState = results[6];
+        }
+
         document.getElementById('last-update').textContent = 'Last update: ' + new Date().toLocaleTimeString();
     } catch (err) {
         setConnected(false);
@@ -361,6 +542,9 @@ async function refreshAll() {
 }
 
 function startPolling() {
+    initUiAssetsNotice();
+    initPolicyControls();
+    initEnrollPanel();
     refreshAll();
     pollTimer = setInterval(refreshAll, POLL_INTERVAL);
 }

@@ -1,11 +1,38 @@
 #!/usr/bin/env python3
-"""Ecosystem MCP Server — Bridges Claude Code with appEcosystem service registry and events."""
+"""Ecosystem MCP Server — Bridges Claude Code with appEcosystem service registry, events, and policy engine."""
 
 import json
+import os
 import sys
+from pathlib import Path
 import httpx
 
-REGISTRY_URL = "http://localhost:8500"
+REGISTRY_URL = os.environ.get("ECOSYSTEM_REGISTRY_URL", "http://localhost:8500").rstrip("/")
+
+
+def _ensure_ecosystem_auth() -> None:
+    env = os.environ.get("APP_ECOSYSTEM_PATH")
+    candidates = [Path(env).expanduser()] if env else []
+    for parent in Path(__file__).resolve().parents:
+        candidates.append(parent / "appEcosystem")
+    for root in candidates:
+        if root.is_dir():
+            for rel in ("auth/python", "packages/ecosystem-client", "packages/ecosystem-policy"):
+                p = (root / rel).resolve()
+                if p.is_dir() and str(p) not in sys.path:
+                    sys.path.insert(0, str(p))
+            break
+
+
+def _signed_headers(method: str, url: str, body: dict | None = None) -> dict:
+    _ensure_ecosystem_auth()
+    try:
+        from ecosystem_auth.tokens import get_ecosystem_secret, sign_request
+
+        secret = get_ecosystem_secret()
+        return sign_request(method, url, secret, body=body)
+    except Exception:
+        return {}
 
 
 def handle_tool_call(name, arguments):
@@ -13,13 +40,46 @@ def handle_tool_call(name, arguments):
         if name == "publish_event":
             event_type = arguments["event_type"]
             data = arguments.get("data", {})
+            url = f"{REGISTRY_URL}/events/publish"
+            payload = {
+                "event_type": event_type,
+                "source": "aegissiem_daemon",
+                "data": data,
+            }
+            headers = _signed_headers("POST", url, payload)
+            if not headers:
+                # Signing failed (e.g. ECOSYSTEM_SECRET missing). Surface the local
+                # configuration error instead of silently sending an unsigned request
+                # the registry would reject anyway.
+                return {"success": False, "error": "Request signing failed (missing ecosystem secret?); not sending unsigned"}
             with httpx.Client(timeout=10) as client:
-                resp = client.post(f"{REGISTRY_URL}/events/publish", json={
-                    "event_type": event_type,
-                    "source": "aegissiem_daemon",
-                    "data": data,
-                })
+                resp = client.post(url, json=payload, headers=headers)
                 return {"success": resp.status_code == 200, "status_code": resp.status_code}
+
+        elif name == "get_policy_state":
+            with httpx.Client(timeout=5) as client:
+                resp = client.get(f"{REGISTRY_URL}/policy/state")
+                if resp.status_code == 200:
+                    return resp.json()
+                return {"error": f"Registry returned {resp.status_code}"}
+
+        elif name == "check_policy":
+            url = f"{REGISTRY_URL}/policy/decide"
+            payload = {
+                "actor": arguments.get("actor", "cyber_agents/mcp"),
+                "action": arguments["action"],
+                "action_class": arguments["action_class"],
+                "target": arguments.get("target", {}),
+                "rationale": arguments.get("rationale", ""),
+            }
+            headers = _signed_headers("POST", url, payload)
+            if not headers:
+                return {"error": "Request signing failed (missing ecosystem secret?); not sending unsigned"}
+            with httpx.Client(timeout=5) as client:
+                resp = client.post(url, json=payload, headers=headers)
+                if resp.status_code == 200:
+                    return resp.json()
+                return {"error": f"Policy decide returned {resp.status_code}: {resp.text}"}
 
         elif name == "discover_service":
             service_name = arguments["service_name"]
@@ -56,11 +116,21 @@ def handle_tool_call(name, arguments):
 
 def main():
     tools = [
-        {"name": "publish_event", "description": "Publish an event to the ecosystem event bus",
+        {"name": "publish_event", "description": "Publish a signed event to the ecosystem event bus",
          "inputSchema": {"type": "object", "properties": {
              "event_type": {"type": "string", "description": "Event type (e.g., security.alert, security.threat_blocked)"},
              "data": {"type": "object", "description": "Event payload data"}
          }, "required": ["event_type"]}},
+        {"name": "get_policy_state", "description": "Inspect active ecosystem blue-team policy state, Freeze status, and Restrictions: Off grants",
+         "inputSchema": {"type": "object", "properties": {}}},
+        {"name": "check_policy", "description": "Evaluate an ActionRequest against the authoritative PolicyEngine before executing mutating or investigative actions",
+         "inputSchema": {"type": "object", "properties": {
+             "actor": {"type": "string", "description": "Actor identifier (default: cyber_agents/mcp)"},
+             "action": {"type": "string", "description": "Action name (e.g., block_ip, zbt_scan, triage)"},
+             "action_class": {"type": "string", "enum": ["observe", "investigate", "contain", "remediate", "data_release", "system_change"]},
+             "target": {"type": "object", "description": "Target metadata (device_id, router, external_ip, etc.)"},
+             "rationale": {"type": "string", "description": "Reason for the action"}
+         }, "required": ["action", "action_class"]}},
         {"name": "discover_service", "description": "Discover a peer service in the ecosystem",
          "inputSchema": {"type": "object", "properties": {
              "service_name": {"type": "string", "description": "Service name (e.g., openeye, ai_for_survival, magicmirror)"}

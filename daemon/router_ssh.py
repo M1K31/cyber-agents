@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import shlex
 from pathlib import Path
 from typing import Optional
 
@@ -84,8 +85,14 @@ async def block_ip(
     Returns:
         True if both rules were applied successfully.
     """
-    cmd_input = f"iptables -I INPUT -s {ip} -j DROP"
-    cmd_forward = f"iptables -I FORWARD -s {ip} -j DROP"
+    # Quote the IP: it is interpolated into a shell command run over SSH, and
+    # the caller is not the only path that reaches here (auto-block feeds it too).
+    q = shlex.quote(ip)
+    # iptables only holds IPv4 rules; an IPv6 address needs ip6tables or the
+    # command simply fails and the address is never blocked.
+    binary = "ip6tables" if ":" in ip else "iptables"
+    cmd_input = f"{binary} -I INPUT -s {q} -j DROP"
+    cmd_forward = f"{binary} -I FORWARD -s {q} -j DROP"
 
     success_input, out1 = await _run_command(host, cmd_input, username, key_file, port)
     success_forward, out2 = await _run_command(host, cmd_forward, username, key_file, port)
@@ -105,18 +112,45 @@ async def unblock_ip(
     key_file: Optional[str] = None,
     port: int = 22,
 ) -> bool:
-    """Remove iptables block rules for an IP.
+    """Remove the DROP rules for an IP and confirm they are gone.
 
-    Uses 2>/dev/null to suppress errors if rules don't exist.
+    Returns True only when the router was reached and, for both INPUT and
+    FORWARD, a follow-up ``-C`` check reports that no matching rule remains.
+    An unreachable router, a rule that is still present, or a check that could
+    not be evaluated (lock held, iptables without ``-C``) all return False:
+    callers must never tell an operator an IP is unblocked on that basis.
+
+    The same rule can have been inserted more than once (a re-applied block),
+    so deletion loops until ``-D`` finds nothing left to delete.
     """
-    cmd_input = f"iptables -D INPUT -s {ip} -j DROP 2>/dev/null"
-    cmd_forward = f"iptables -D FORWARD -s {ip} -j DROP 2>/dev/null"
+    q = shlex.quote(ip)
+    # iptables only holds IPv4 rules; an IPv6 address has to be checked with
+    # ip6tables or the check can never come back conclusive.
+    binary = "ip6tables" if ":" in ip else "iptables"
 
-    success1, _ = await _run_command(host, cmd_input, username, key_file, port)
-    success2, _ = await _run_command(host, cmd_forward, username, key_file, port)
+    states: dict[str, str] = {}
+    for chain in ("INPUT", "FORWARD"):
+        rule = f"{chain} -s {q} -j DROP"
+        command = (
+            f"while {binary} -D {rule} 2>/dev/null; do :; done; "
+            f"{binary} -C {rule} 2>/dev/null; rc=$?; "
+            'if [ "$rc" -eq 0 ]; then echo PRESENT; '
+            'elif [ "$rc" -eq 1 ]; then echo ABSENT; '
+            "else echo UNKNOWN; fi"
+        )
+        reached, output = await _run_command(host, command, username, key_file, port)
+        lines = [line.strip() for line in output.splitlines() if line.strip()]
+        states[chain] = (lines[-1] if lines else "NO-OUTPUT") if reached else "UNREACHABLE"
 
-    logger.info("Unblocked IP %s on %s (INPUT=%s, FORWARD=%s)", ip, host, success1, success2)
-    return True  # Best-effort unblock
+    confirmed = all(state == "ABSENT" for state in states.values())
+    if confirmed:
+        logger.info("Unblocked IP %s on %s", ip, host)
+    else:
+        logger.error(
+            "Could not confirm unblock of IP %s on %s: INPUT=%s FORWARD=%s",
+            ip, host, states["INPUT"], states["FORWARD"],
+        )
+    return confirmed
 
 
 async def reapply_blocks(
