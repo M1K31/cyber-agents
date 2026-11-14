@@ -172,10 +172,26 @@ def build_cyber_agents_capabilities() -> list[dict[str, Any]]:
     ]
 
 
+def _hour_bucket(ts: Any) -> str:
+    """`YYYYMMDDHH` for a datetime or an ISO-8601 string, so both forms of one instant match.
+
+    Kept identical to AegisSIEM's `_hour_bucket`: the two apps must produce the
+    same dedupe key for the same threat.
+    """
+    if hasattr(ts, "strftime"):
+        return ts.strftime("%Y%m%d%H")
+    text = str(ts or "").strip()
+    try:
+        from datetime import datetime
+
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).strftime("%Y%m%d%H")
+    except ValueError:
+        return text[:13]
+
+
 def threat_dedupe_key(threat: Any) -> str:
     """Shared deterministic dedupe key across cyber-agents and AegisSIEM."""
-    ts = getattr(threat, "timestamp", "")
-    hour_bucket = ts.strftime("%Y%m%d%H") if hasattr(ts, "strftime") else str(ts)[:13]
+    hour_bucket = _hour_bucket(getattr(threat, "timestamp", ""))
     source_ip = getattr(threat, "source_ip", None) or "unknown"
     threat_type = getattr(threat, "threat_type", None) or "unknown"
     # Include severity so an escalation (e.g. a CRITICAL threat following a LOW one

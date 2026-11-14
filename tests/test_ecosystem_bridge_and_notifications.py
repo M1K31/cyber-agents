@@ -5,6 +5,8 @@ import asyncio
 from datetime import datetime
 from types import SimpleNamespace
 
+import pytest
+
 from daemon.ecosystem_bridge import (
     _ensure_ecosystem_paths,
     build_cyber_agents_capabilities,
@@ -153,3 +155,24 @@ def test_scheduled_publish_task_is_retained_and_its_failure_is_logged(caplog):
     failures = [r for r in caplog.records if "scheduled hub publish" in r.getMessage().lower()]
     assert len(failures) == 1
     assert "203.0.113.42:high" in failures[0].getMessage()  # dedupe key, no payload
+
+
+@pytest.mark.parametrize(
+    "timestamp",
+    [
+        datetime(2026, 11, 1, 20, 15, 0),
+        "2026-11-01T20:15:00",
+        "2026-11-01 20:15:00",
+        "2026-11-01T20:15:00.123456",
+        "2026-11-01T20:59:59Z",
+    ],
+)
+def test_dedupe_key_is_the_same_for_datetime_and_iso_string(timestamp):
+    """Kept identical to AegisSIEM's key: one instant must give one key in both apps."""
+    threat = SimpleNamespace(threat_type="ssh_bruteforce", source_ip="203.0.113.42", timestamp=timestamp)
+    assert threat_dedupe_key(threat) == "aegissiem:ssh_bruteforce:203.0.113.42:medium:2026110120"
+
+
+def test_dedupe_key_tolerates_an_unparseable_timestamp():
+    threat = SimpleNamespace(threat_type="x", source_ip="1.2.3.4", timestamp="yesterday-ish")
+    assert threat_dedupe_key(threat).startswith("aegissiem:x:1.2.3.4:medium:")
