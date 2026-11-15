@@ -28,7 +28,8 @@ dependencies = [
     # only importable from a sibling appEcosystem checkout, which is why a
     # clean install could not start.
     "appecosystem-policy>=0.3.0",
-    "appecosystem-hub>=0.1.0",
+    # 0.2.0: CommandReceiver and the aiohttp adapter behind POST /ecosystem/commands.
+    "appecosystem-hub>=0.2.0",
 ]
 
 [project.optional-dependencies]

@@ -286,6 +286,13 @@ class HoneypotManager:
                 except OSError as e:
                     logger.warning("Could not start %s honeypot: %s", listener.service, e)
 
+    def active_listeners(self) -> list[dict]:
+        """The listeners currently deployed: service, port and whether they tarpit. Read-only."""
+        return [
+            {"service": listener.service, "port": listener.port, "tarpit": bool(listener.tarpit)}
+            for listener in self._listeners
+        ]
+
     async def stop_all(self) -> int:
         """Stop every listener; return how many could NOT be stopped.
 

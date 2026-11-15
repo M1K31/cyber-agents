@@ -242,6 +242,10 @@ async def _read_json_optional(request: web.Request) -> dict[str, Any]:
 _PEER_PRINCIPAL = "ecosystem-peer"
 
 
+# The CommandReceiver mounted at POST /ecosystem/commands, or None when there is none.
+COMMAND_RECEIVER = web.AppKey("command_receiver", object)
+
+
 def create_api(db: Database, pipeline: ResponsePipeline, *, step_up_auth: Any = None) -> web.Application:
     """Create the aiohttp web application with API routes, step-up auth, and policy controls."""
     from .ecosystem_bridge import (
@@ -844,6 +848,21 @@ def create_api(db: Database, pipeline: ResponsePipeline, *, step_up_auth: Any = 
     app.router.add_post("/api/auth/step-up/totp/enroll", post_totp_enroll)
     app.router.add_post("/api/auth/step-up/totp/verify", post_totp_verify)
     app.router.add_post("/ecosystem/events", post_ecosystem_event)
+
+    # Hub commands (POST /ecosystem/commands), mounted only with a valid ecosystem
+    # secret. The receiver checks the signature, runs this daemon's own policy
+    # engine and confirms any approval with the hub before a handler runs.
+    command_receiver = None
+    try:
+        from .ecosystem_commands import build_receiver
+        from ecosystem_hub.command_adapters import build_aiohttp_handler
+
+        command_receiver = build_receiver(db, pipeline.honeypot, policy_engine=policy_engine)
+        if command_receiver is not None:
+            app.router.add_post("/ecosystem/commands", build_aiohttp_handler(command_receiver))
+    except ImportError as exc:  # an appecosystem-hub older than 0.2.0: run without the route
+        logger.warning("Hub commands are unavailable (appecosystem-hub>=0.2.0 needed): %s", exc)
+    app[COMMAND_RECEIVER] = command_receiver
     app.router.add_get("/ui/{name}", serve_ui_asset)
     app.router.add_get("/ui/fonts/{name}", serve_ui_font)
     dash_dir = Path(__file__).resolve().parent.parent / "dashboard"

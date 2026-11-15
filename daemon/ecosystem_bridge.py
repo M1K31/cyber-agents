@@ -133,19 +133,27 @@ def resolve_ui_asset_path(filename: str) -> Path | None:
 
 
 def build_cyber_agents_capabilities() -> list[dict[str, Any]]:
-    """Capabilities contributed by cyber-agents (`aegissiem_daemon`) to the ecosystem mesh."""
+    """Capabilities contributed by cyber-agents (`aegissiem_daemon`) to the ecosystem mesh.
+
+    The two invocable ones carry the `inputs_schema` their handlers in
+    `ecosystem_commands` accept. Triage is `observe`: it reads local data and runs
+    a model, touching no system, so it is not an investigation of anyone's host.
+    """
+    from .ecosystem_commands import HONEYPOT_STATUS_SCHEMA, TRIAGE_SCHEMA
+
     return [
         {
             "capability": "security.triage_threat",
             "version": 1,
             "description": "Local/brokered LLM security triage and threat classification over syslog and SIEM context.",
-            "action_class": "investigate",
+            "action_class": "observe",
             "required_grant": "security:triage",
             "requirements": {"os": ["darwin", "linux", "win32"], "min_tier": 1, "needs_gpu": False},
             "timeout_seconds": 60,
             "cancellable": True,
             "idempotent": True,
             "offline_behavior": "run_local",
+            "inputs_schema": TRIAGE_SCHEMA,
         },
         {
             "capability": "security.honeypot_status",
@@ -157,6 +165,7 @@ def build_cyber_agents_capabilities() -> list[dict[str, Any]]:
             "cancellable": True,
             "idempotent": True,
             "offline_behavior": "run_local",
+            "inputs_schema": HONEYPOT_STATUS_SCHEMA,
         },
         {
             "capability": "ecosystem.freeze",
