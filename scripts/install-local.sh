@@ -10,6 +10,25 @@
 #   ./scripts/install-local.sh --plist    # also install + load the LaunchAgent
 set -euo pipefail
 
+# `launchctl bootout` returns before the old instance has finished shutting
+# down. A `bootstrap` issued straight after it fails with
+# "Bootstrap failed: 5: Input/output error" and leaves the service UNLOADED —
+# so re-running this installer over a running service used to stop it for good.
+# Wait for the old instance to go, then retry the bootstrap.
+reload_launch_agent() {  # <domain> <label> <plist>
+    local _i
+    launchctl bootout "$1/$2" 2>/dev/null || true
+    for _i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+        launchctl print "$1/$2" >/dev/null 2>&1 || break
+        sleep 0.5
+    done
+    for _i in 1 2 3 4 5; do
+        launchctl bootstrap "$1" "$3" 2>/dev/null && return 0
+        sleep 1
+    done
+    launchctl bootstrap "$1" "$3"   # final attempt, with its error shown
+}
+
 # Distros disagree on which Python minor they ship, so honour the project
 # minimum (3.10) instead of one exact version: pinning python3.12 fails on
 # Debian bookworm (3.11), Ubuntu 22.04 (3.10), and anything newer.
@@ -73,7 +92,7 @@ fi
 # checkout, for developing the packages themselves, and fails loudly when the
 # checkout is absent rather than leaving the PyPI copies silently in place.
 if [ -n "${ECOSYSTEM_FROM_SOURCE:-}" ]; then
-    ECO_ROOT="${ECOSYSTEM_BASE_PATH:-$REPO/../..}/appEcosystem"
+    ECO_ROOT="${ECOSYSTEM_BASE_PATH:-$REPO/..}/appEcosystem"
     if [ ! -d "$ECO_ROOT/auth/python" ]; then
         echo "ERROR: ECOSYSTEM_FROM_SOURCE=1 but no appEcosystem checkout at $ECO_ROOT" >&2
         exit 1
@@ -82,6 +101,10 @@ if [ -n "${ECOSYSTEM_FROM_SOURCE:-}" ]; then
     "$VENV/bin/pip" install -e "$ECO_ROOT/auth/python" \
                             -e "$ECO_ROOT/packages/ecosystem-client" \
                             -e "$ECO_ROOT/packages/ecosystem-ai" \
+                            -e "$ECO_ROOT/packages/ecosystem-hub" \
+                            -e "$ECO_ROOT/packages/ecosystem-policy" \
+                            -e "$ECO_ROOT/packages/ecosystem-compute" \
+                            -e "$ECO_ROOT/packages/ecosystem-voice" \
         || { echo "ERROR: editable ecosystem install failed" >&2; exit 1; }
 fi
 
@@ -109,8 +132,7 @@ if $WRITE_PLIST; then
   <key>StandardErrorPath</key><string>$LOGDIR/stderr.log</string>
 </dict></plist>
 PLIST_EOF
-    launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
-    launchctl bootstrap "gui/$(id -u)" "$PLIST"
+    reload_launch_agent "gui/$(id -u)" "$LABEL" "$PLIST"
     echo "==> LaunchAgent loaded ($LABEL, port $PORT)"
 else
     echo "==> Runtime ready (opt-in). Enable the service with: $0 --plist"
