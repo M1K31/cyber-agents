@@ -4,8 +4,11 @@ The hub forwards a command to `POST /ecosystem/commands`; the CommandReceiver
 from appecosystem-hub verifies it, runs the daemon's own policy gate, then calls
 one of these handlers.
 
-- `security.triage_threat` (observe) asks the selected AI provider to assess a
-  stored threat or a supplied text. It reads local data and touches no system.
+- `security.triage_threat` (observe) asks the local AI model to assess a
+  stored threat or a supplied text. It reads local data and touches no system,
+  and it runs only while the AI profile keeps security analysis on the device:
+  if it could reach a cloud provider, the logs would be released to a third
+  party, which `observe` does not cover, so the command is refused.
   The model's answer is returned as text: nothing in it is parsed into an
   action or executed, whatever it says. Only a one-word verdict is picked out,
   and only from a fixed set.
@@ -65,10 +68,18 @@ Analyze = Callable[[str], Awaitable[tuple[str, str, str]]]
 
 
 class DaemonCommandHandlers:
-    def __init__(self, db: Any, honeypot_manager: Any, *, analyze: Analyze | None = None):
+    def __init__(
+        self,
+        db: Any,
+        honeypot_manager: Any,
+        *,
+        analyze: Analyze | None = None,
+        stays_local: Callable[[], bool] | None = None,
+    ):
         self._db = db
         self._honeypots = honeypot_manager
         self._analyze = analyze
+        self._stays_local = stays_local
 
     async def _run_analysis(self, prompt: str) -> tuple[str, str, str]:
         if self._analyze is not None:
@@ -107,7 +118,21 @@ class DaemonCommandHandlers:
                 raise _command_failed(f"text must be a non-empty string of at most {MAX_TRIAGE_TEXT} characters")
             event = text
 
-        from .llm_backend import AnalysisUnavailable, last_capability
+        from .llm_backend import AnalysisUnavailable, last_capability, security_analysis_stays_local
+
+        # `observe` is right only while nothing leaves the device. If the AI profile
+        # could send this analysis to a cloud provider, the stored logs would be
+        # released to a third party on any mesh caller's say-so; refuse instead.
+        stays_local = self._stays_local or security_analysis_stays_local
+        try:
+            local = bool(stays_local())
+        except Exception as exc:
+            logger.warning("Could not tell whether triage stays local: %r", exc)
+            local = False
+        if not local:
+            raise _command_failed(
+                "triage over the hub runs only on a local model; the AI profile could send it to a cloud provider"
+            )
 
         try:
             analysis, model, provider = await self._run_analysis(_PROMPT.format(event=event))

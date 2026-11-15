@@ -233,3 +233,44 @@ def test_route_round_trip_through_aiohttp(eco_env):
     assert code == 200 and body["status"] == "completed", body
     assert body["result"]["active"] == []
     assert bad == 401
+
+
+# ---- triage stays on the device --------------------------------------------------------
+
+
+_CLOUD = {"claude": {"enabled": True, "model": "x"}}
+
+
+@pytest.mark.parametrize("profile,local", [
+    ({}, True),
+    ({"default_provider": "ollama", "cloud": _CLOUD}, True),
+    ({"task_providers": {"security": "claude"}, "cloud": _CLOUD}, False),
+    ({"prefer": "cloud", "cloud": _CLOUD}, False),
+    ({"default_provider": "claude", "cloud": _CLOUD}, False),
+    ({"allow_cloud_fallback": True, "cloud": _CLOUD}, False),
+    ({"allow_cloud_fallback": True}, True),
+])
+def test_security_analysis_stays_local(profile, local):
+    from daemon.llm_backend import security_analysis_stays_local
+
+    assert security_analysis_stays_local(profile) is local
+
+
+def test_triage_refuses_when_the_profile_could_reach_a_cloud_provider(db):
+    model = FakeModel()
+    handlers = ec.DaemonCommandHandlers(db, FakeHoneypots([]), analyze=model, stays_local=lambda: False)
+    with pytest.raises(CommandFailed) as err:
+        run(handlers.triage_threat(_ctx("security.triage_threat", {"text": "x"})))
+    assert "local model" in err.value.message
+    assert model.prompts == []
+
+
+def test_triage_refuses_when_locality_cannot_be_determined(db):
+    def broken():
+        raise RuntimeError("profile unreadable")
+
+    model = FakeModel()
+    handlers = ec.DaemonCommandHandlers(db, FakeHoneypots([]), analyze=model, stays_local=broken)
+    with pytest.raises(CommandFailed):
+        run(handlers.triage_threat(_ctx("security.triage_threat", {"text": "x"})))
+    assert model.prompts == []

@@ -67,6 +67,35 @@ def _build_router():
     return build_router(profile)
 
 
+LOCAL_PROVIDERS = frozenset({"ollama"})
+
+
+def security_analysis_stays_local(profile: Optional[dict[str, Any]] = None) -> bool:
+    """True only when a `security` analysis can run on nothing but a local model.
+
+    Mirrors ecosystem_ai's provider order for the task: a per-task pin wins,
+    else `prefer: cloud` puts enabled cloud providers first, else the default
+    provider. Cloud fallback with any cloud provider enabled could also send
+    the prompt off the device, so that is not local either. An unreadable
+    profile falls back to the packaged defaults (Ollama, no cloud), as
+    `analyze` itself does.
+    """
+    from ecosystem_ai import AIProfile
+
+    prof = AIProfile.from_dict(profile if profile is not None else _load_profile_dict())
+    cloud_enabled = [name for name, cfg in (prof.cloud or {}).items() if getattr(cfg, "enabled", False)]
+    pinned = (getattr(prof, "task_providers", {}) or {}).get("security") or ""
+    if pinned:
+        first = pinned
+    elif prof.prefer == "cloud" and cloud_enabled:
+        first = cloud_enabled[0]
+    else:
+        first = prof.default_provider
+    if first not in LOCAL_PROVIDERS:
+        return False
+    return not (prof.allow_cloud_fallback and cloud_enabled)
+
+
 def describe_backend() -> dict[str, Any]:
     """Non-secret description of the active backend. Safe to log or return."""
     prof = _load_profile_dict()
