@@ -12,4 +12,4 @@ appecosystem-client>=0.4.0
 appecosystem-auth>=0.4.0
 appecosystem-ai>=0.1.1,<0.2
 appecosystem-policy>=0.3.0
-appecosystem-hub>=0.1.0
+appecosystem-hub>=0.2.0
