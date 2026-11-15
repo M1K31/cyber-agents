@@ -38,10 +38,11 @@ def _ctx(command, parameters):
 
 class FakeModel:
     def __init__(self, answer="VERDICT: suspicious\nRepeated SSH failures from one source.", fail=False):
-        self.answer, self.fail, self.prompts = answer, fail, []
+        self.answer, self.fail, self.prompts, self.local_only = answer, fail, [], []
 
-    async def __call__(self, prompt):
+    async def __call__(self, prompt, *, local_only=False):
         self.prompts.append(prompt)
+        self.local_only.append(local_only)
         if self.fail:
             from daemon.llm_backend import AnalysisUnavailable
 
@@ -256,21 +257,76 @@ def test_security_analysis_stays_local(profile, local):
     assert security_analysis_stays_local(profile) is local
 
 
-def test_triage_refuses_when_the_profile_could_reach_a_cloud_provider(db):
+def test_triage_asks_for_a_local_only_analysis(db):
     model = FakeModel()
-    handlers = ec.DaemonCommandHandlers(db, FakeHoneypots([]), analyze=model, stays_local=lambda: False)
+    run(_handlers(db, model).triage_threat(_ctx("security.triage_threat", {"text": "x"})))
+    assert model.local_only == [True]
+
+
+def test_triage_not_local_is_failed(db):
+    from daemon.llm_backend import AnalysisNotLocal
+
+    async def refuse(prompt, *, local_only=False):
+        raise AnalysisNotLocal("this analysis runs only on a local model")
+
     with pytest.raises(CommandFailed) as err:
-        run(handlers.triage_threat(_ctx("security.triage_threat", {"text": "x"})))
+        run(ec.DaemonCommandHandlers(db, FakeHoneypots([]), analyze=refuse).triage_threat(
+            _ctx("security.triage_threat", {"text": "x"})))
     assert "local model" in err.value.message
-    assert model.prompts == []
 
 
-def test_triage_refuses_when_locality_cannot_be_determined(db):
-    def broken():
-        raise RuntimeError("profile unreadable")
+class _Result:
+    def __init__(self, provider):
+        self.text, self.model, self.provider = "VERDICT: benign", "m", provider
 
-    model = FakeModel()
-    handlers = ec.DaemonCommandHandlers(db, FakeHoneypots([]), analyze=model, stays_local=broken)
-    with pytest.raises(CommandFailed):
-        run(handlers.triage_threat(_ctx("security.triage_threat", {"text": "x"})))
-    assert model.prompts == []
+
+class _Router:
+    def __init__(self, provider):
+        self.provider, self.last_capability = provider, None
+
+    async def chat(self, messages, task):
+        return _Result(self.provider)
+
+
+def test_local_only_analysis_loads_the_profile_once_and_forces_it_local(monkeypatch):
+    from daemon import llm_backend
+
+    loads, built = [], []
+    profile = {"default_provider": "ollama", "cloud": _CLOUD}
+
+    def load():
+        loads.append(1)
+        return dict(profile)
+
+    def build(profile_dict=None):
+        built.append(profile_dict)
+        return _Router("ollama")
+
+    monkeypatch.setattr(llm_backend, "_load_profile_dict", load)
+    monkeypatch.setattr(llm_backend, "_build_router", build)
+    text, _model, provider = run(llm_backend.analyze("p", local_only=True))
+    assert provider == "ollama" and loads == [1]
+    [forced] = built
+    assert forced["cloud"]["claude"]["enabled"] is False
+    assert forced["allow_cloud_fallback"] is False and forced["prefer"] == "local"
+
+
+def test_local_only_analysis_refuses_a_cloud_profile_before_any_call(monkeypatch):
+    from daemon import llm_backend
+
+    built = []
+    monkeypatch.setattr(llm_backend, "_load_profile_dict",
+                        lambda: {"task_providers": {"security": "claude"}, "cloud": _CLOUD})
+    monkeypatch.setattr(llm_backend, "_build_router", lambda profile_dict=None: built.append(1))
+    with pytest.raises(llm_backend.AnalysisNotLocal):
+        run(llm_backend.analyze("p", local_only=True))
+    assert built == []
+
+
+def test_local_only_analysis_rejects_a_cloud_answer(monkeypatch):
+    from daemon import llm_backend
+
+    monkeypatch.setattr(llm_backend, "_load_profile_dict", lambda: {})
+    monkeypatch.setattr(llm_backend, "_build_router", lambda profile_dict=None: _Router("claude"))
+    with pytest.raises(llm_backend.AnalysisNotLocal):
+        run(llm_backend.analyze("p", local_only=True))
