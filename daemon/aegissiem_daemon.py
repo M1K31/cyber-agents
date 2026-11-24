@@ -829,8 +829,57 @@ def create_api(db: Database, pipeline: ResponsePipeline, *, step_up_auth: Any = 
             payload["capability_level"] = cap.get("level")
         return web.json_response(payload)
 
+    async def get_triage_runs(request: web.Request) -> web.Response:
+        threat_id_raw = request.query.get("threat_id")
+        threat_id_filter: int | None = None
+        if threat_id_raw:
+            try:
+                threat_id_filter = int(threat_id_raw)
+            except ValueError:
+                return web.json_response({"error": "invalid threat_id"}, status=400)
+        try:
+            limit = max(1, min(int(request.query.get("limit", "50")), 200))
+        except ValueError:
+            limit = 50
+        runs = db.list_triage_runs(threat_id=threat_id_filter, limit=limit)
+        return web.json_response({"runs": runs})
+
+    async def get_triage_run_detail(request: web.Request) -> web.Response:
+        try:
+            run_id = int(request.match_info["id"])
+        except ValueError:
+            return web.json_response({"error": "invalid run id"}, status=400)
+        run = db.get_triage_run(run_id)
+        if not run:
+            return web.json_response({"error": "triage run not found"}, status=404)
+        return web.json_response(run)
+
+    async def get_triage_run_handoff(request: web.Request) -> web.Response:
+        try:
+            run_id = int(request.match_info["id"])
+        except ValueError:
+            return web.json_response({"error": "invalid run id"}, status=400)
+        run = db.get_triage_run(run_id)
+        if not run:
+            return web.json_response({"error": "triage run not found"}, status=404)
+        fmt = request.query.get("format", "json").lower()
+        from .triage_engine import build_authority_handoff_profile
+
+        if fmt == "markdown":
+            md = build_authority_handoff_profile(run, output_format="markdown")
+            return web.Response(
+                text=str(md),
+                content_type="text/markdown",
+                headers={"Content-Disposition": f'attachment; filename="incident-handoff-{run_id}.md"'},
+            )
+        profile = build_authority_handoff_profile(run, output_format="json")
+        return web.json_response(profile)
+
     app.router.add_get("/api/status", get_status)
     app.router.add_get("/api/threats", get_threats)
+    app.router.add_get("/api/triage/runs", get_triage_runs)
+    app.router.add_get("/api/triage/runs/{id}", get_triage_run_detail)
+    app.router.add_get("/api/triage/runs/{id}/handoff", get_triage_run_handoff)
     app.router.add_post("/api/threats/{id}/block", post_block_threat)
     app.router.add_post("/api/threats/{id}/resolve", post_resolve_threat)
     app.router.add_get("/api/profiles", get_profiles)

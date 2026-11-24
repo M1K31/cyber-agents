@@ -99,7 +99,19 @@ class DaemonCommandHandlers:
         if has_id == has_text:
             raise _command_failed("give exactly one of threat_id or text")
 
+        from .agent_prompts import build_triage_system_prompt
+        from .redaction import redact_sensitive_data
+        from .triage_engine import (
+            build_triage_timeline_steps,
+            classify_disruption,
+            extract_mitre_techniques,
+            parse_triage_proposals,
+        )
+
         threat_id = None
+        threat_type = ""
+        severity = str(params.get("severity") or "MEDIUM")
+        source_ip: str | None = None
         if has_id:
             threat_id = params["threat_id"]
             if not isinstance(threat_id, int) or isinstance(threat_id, bool) or threat_id < 1:
@@ -107,10 +119,13 @@ class DaemonCommandHandlers:
             threat = self._db.get_threat(threat_id)
             if threat is None:
                 raise _command_failed(f"no threat with id {threat_id}")
+            threat_type = str(getattr(threat, "threat_type", "") or "")
+            severity = str(getattr(threat.severity, "value", threat.severity) or "MEDIUM")
+            source_ip = getattr(threat, "source_ip", None)
             event = "\n".join([
-                f"type: {threat.threat_type}",
-                f"severity: {getattr(threat.severity, 'value', threat.severity)}",
-                f"source_ip: {threat.source_ip or 'unknown'}",
+                f"type: {threat_type}",
+                f"severity: {severity}",
+                f"source_ip: {source_ip or 'unknown'}",
                 f"router: {threat.router_name}",
                 f"time: {threat.timestamp.isoformat() if hasattr(threat.timestamp, 'isoformat') else threat.timestamp}",
                 f"log: {(threat.raw_log or '')[:MAX_TRIAGE_TEXT]}",
@@ -121,23 +136,77 @@ class DaemonCommandHandlers:
                 raise _command_failed(f"text must be a non-empty string of at most {MAX_TRIAGE_TEXT} characters")
             event = text
 
+        # Protect PII, PHI (health), and PCI/financial data before analysis or storage
+        redacted_event, redaction_counts = redact_sensitive_data(event)
+        role_prompt = build_triage_system_prompt()
+        full_prompt = f"{role_prompt}\n\n<<<EVENT\n{redacted_event}\nEVENT>>>"
+
         from .llm_backend import AnalysisUnavailable, last_capability
 
         try:
-            analysis, model, provider = await self._run_analysis(_PROMPT.format(event=event))
+            analysis, model, provider = await self._run_analysis(full_prompt)
         except AnalysisUnavailable as exc:
             raise _command_failed(str(exc)) from None
 
-        analysis = str(analysis or "")
+        analysis_raw = str(analysis or "")
+        analysis_redacted, out_redactions = redact_sensitive_data(analysis_raw)
+        for cat, cnt in out_redactions.items():
+            redaction_counts[cat] = redaction_counts.get(cat, 0) + cnt
+
+        verdict = _verdict(analysis_redacted)
+        proposals = parse_triage_proposals(analysis_redacted)
+        mitre_techniques = extract_mitre_techniques(analysis_redacted)
+        disruptive_critical = classify_disruption(
+            f"{redacted_event}\n{analysis_redacted}",
+            threat_type=threat_type,
+            severity=severity,
+            verdict=verdict,
+        )
+        timeline = build_triage_timeline_steps(
+            verdict=verdict,
+            disruptive_critical=disruptive_critical,
+            proposals=proposals,
+            redaction_summary=redaction_counts,
+            model=str(model or ""),
+        )
+
+        triage_run_id: int | None = None
+        if hasattr(self._db, "insert_triage_run"):
+            try:
+                triage_run_id = self._db.insert_triage_run({
+                    "threat_id": threat_id,
+                    "source_ip": source_ip,
+                    "severity": severity,
+                    "verdict": verdict,
+                    "disruptive_critical": disruptive_critical,
+                    "summary": analysis_redacted[:MAX_ANALYSIS_CHARS],
+                    "redacted_event": redacted_event[:MAX_TRIAGE_TEXT],
+                    "mitre_techniques": mitre_techniques,
+                    "proposals": proposals,
+                    "triage_timeline": timeline,
+                    "redaction_summary": redaction_counts,
+                    "model": model,
+                    "provider": provider,
+                })
+            except Exception as exc:
+                logger.warning("Failed to persist triage run: %s", exc)
+
         result: dict[str, Any] = {
-            "verdict": _verdict(analysis),
-            "summary": analysis[:MAX_ANALYSIS_CHARS],
-            "truncated": len(analysis) > MAX_ANALYSIS_CHARS,
+            "verdict": verdict,
+            "summary": analysis_redacted[:MAX_ANALYSIS_CHARS],
+            "truncated": len(analysis_redacted) > MAX_ANALYSIS_CHARS,
             "model": model,
             "provider": provider,
+            "proposals": proposals,
+            "triage_timeline": timeline,
+            "mitre_techniques": mitre_techniques,
+            "disruptive_critical": disruptive_critical,
+            "redaction_summary": redaction_counts,
         }
         if threat_id is not None:
             result["threat_id"] = threat_id
+        if triage_run_id is not None:
+            result["triage_run_id"] = triage_run_id
         cap = last_capability()
         if cap and cap.get("warning"):
             result["capability_warning"] = cap["warning"]
