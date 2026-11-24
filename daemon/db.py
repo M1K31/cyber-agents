@@ -114,10 +114,29 @@ class Database:
                 resolved_at TEXT
             );
 
+            CREATE TABLE IF NOT EXISTS triage_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                threat_id INTEGER,
+                source_ip TEXT,
+                severity TEXT DEFAULT 'MEDIUM',
+                verdict TEXT DEFAULT 'unknown',
+                disruptive_critical INTEGER DEFAULT 0,
+                summary TEXT DEFAULT '',
+                redacted_event TEXT DEFAULT '',
+                mitre_techniques TEXT DEFAULT '[]',
+                proposals TEXT DEFAULT '[]',
+                triage_timeline TEXT DEFAULT '[]',
+                redaction_summary TEXT DEFAULT '{}',
+                model TEXT DEFAULT '',
+                provider TEXT DEFAULT '',
+                created_at TEXT NOT NULL
+            );
+
             CREATE INDEX IF NOT EXISTS idx_threats_status ON threats(status);
             CREATE INDEX IF NOT EXISTS idx_threats_source_ip ON threats(source_ip);
             CREATE INDEX IF NOT EXISTS idx_blocked_ip ON blocked_ips(ip);
             CREATE INDEX IF NOT EXISTS idx_profiles_ip ON attacker_profiles(ip);
+            CREATE INDEX IF NOT EXISTS idx_triage_runs_threat_id ON triage_runs(threat_id);
             CREATE INDEX IF NOT EXISTS idx_profiles_subnet ON attacker_profiles(subnet_24);
             CREATE INDEX IF NOT EXISTS idx_honeypot_ip ON honeypot_events(attacker_ip);
             CREATE INDEX IF NOT EXISTS idx_honeypot_timestamp ON honeypot_events(timestamp);
@@ -528,6 +547,74 @@ class Database:
             created_at=datetime.fromisoformat(row["created_at"]),
             resolved_at=datetime.fromisoformat(row["resolved_at"]) if row["resolved_at"] else None,
         )
+
+    # ── WP5 Triage Runs & Forensic Profiles ─────────────────────────
+
+    def insert_triage_run(self, run: dict) -> int:
+        from datetime import timezone
+        created_at = run.get("created_at") or datetime.now(timezone.utc).isoformat()
+        cur = self.conn.execute(
+            """INSERT INTO triage_runs (
+                threat_id, source_ip, severity, verdict, disruptive_critical,
+                summary, redacted_event, mitre_techniques, proposals,
+                triage_timeline, redaction_summary, model, provider, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                run.get("threat_id"),
+                run.get("source_ip"),
+                str(run.get("severity") or "MEDIUM"),
+                str(run.get("verdict") or "unknown"),
+                1 if run.get("disruptive_critical") else 0,
+                str(run.get("summary") or ""),
+                str(run.get("redacted_event") or ""),
+                json.dumps(run.get("mitre_techniques") or []),
+                json.dumps(run.get("proposals") or []),
+                json.dumps(run.get("triage_timeline") or []),
+                json.dumps(run.get("redaction_summary") or {}),
+                str(run.get("model") or ""),
+                str(run.get("provider") or ""),
+                created_at,
+            ),
+        )
+        self.conn.commit()
+        return cur.lastrowid  # type: ignore[return-value]
+
+    def get_triage_run(self, run_id: int) -> Optional[dict]:
+        row = self.conn.execute("SELECT * FROM triage_runs WHERE id = ?", (run_id,)).fetchone()
+        return self._row_to_triage_run(row) if row else None
+
+    def list_triage_runs(self, *, threat_id: Optional[int] = None, limit: int = 50) -> list[dict]:
+        if threat_id is not None:
+            rows = self.conn.execute(
+                "SELECT * FROM triage_runs WHERE threat_id = ? ORDER BY id DESC LIMIT ?",
+                (threat_id, limit),
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT * FROM triage_runs ORDER BY id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [self._row_to_triage_run(r) for r in rows]
+
+    def _row_to_triage_run(self, row: sqlite3.Row) -> dict:
+        return {
+            "id": row["id"],
+            "run_id": row["id"],
+            "threat_id": row["threat_id"],
+            "source_ip": row["source_ip"],
+            "severity": row["severity"],
+            "verdict": row["verdict"],
+            "disruptive_critical": bool(row["disruptive_critical"]),
+            "summary": row["summary"],
+            "redacted_event": row["redacted_event"],
+            "mitre_techniques": json.loads(row["mitre_techniques"] or "[]"),
+            "proposals": json.loads(row["proposals"] or "[]"),
+            "triage_timeline": json.loads(row["triage_timeline"] or "[]"),
+            "redaction_summary": json.loads(row["redaction_summary"] or "{}"),
+            "model": row["model"],
+            "provider": row["provider"],
+            "created_at": row["created_at"],
+        }
 
     def close(self):
         self.conn.close()
