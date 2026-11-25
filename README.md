@@ -169,6 +169,16 @@ Use the red-team-lead agent to plan a penetration test for the 10.0.0.0/8 intern
 
 ---
 
+## Autonomous Triage & Ecosystem Hardening
+
+The autonomous SOC daemon (`daemon/`) integrates with `appEcosystem` and `AegisSIEM`:
+
+- **Agent-Driven Triage (`security.triage_threat`)**: Loads role prompts from `agents/incident-responder.md` and `agents/threat-hunter.md`, redacts PII/PHI/PCI fields before LLM inference or storage, and returns validated `action-proposal.v1` containment plans.
+- **Disruptive Critical Classification & Authority Handoffs**: Classifies disruptive critical threats for provisional TTL containment while holding non-disruptive threats for operator approval, and exports SHA-256 chain-of-custody NIST SP 800-61 handoff profiles (`/api/triage/runs/{id}/handoff`).
+- **Signed Mesh Freeze & Pinned Router SSH**: `POST /ecosystem/events` strictly requires HMAC-signed peer authentication (even on loopback), and `daemon/router_ssh.py` enforces fail-closed pinned `known_hosts` verification (`ROUTER_SSH_KNOWN_HOSTS` / `~/.aegissiem/known_hosts`) with explicit connect timeouts.
+
+---
+
 ## ⚠️ Important Notes
 
 > [!CAUTION]
