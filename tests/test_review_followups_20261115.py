@@ -18,15 +18,20 @@ def test_font_names_cannot_leave_the_font_directory(name):
 
 
 def test_hub_freeze_event_freezes_the_pipeline(eco_env):
+    import os
+    from ecosystem_auth.tokens import sign_request
+
     db = Database(str(eco_env / "aegissiem.db"))
     pipeline = ResponsePipeline(db=db)
     app = create_api(db, pipeline)
 
     async def go():
+        payload = {"type": "policy.freeze", "data": {"initiated_by": "hub"}}
+        headers = sign_request(
+            "POST", "/ecosystem/events", os.environ["ECOSYSTEM_HMAC_SECRET"], body=payload
+        )
         async with TestClient(TestServer(app)) as client:
-            # TestClient connects from loopback, which the route accepts like a signed peer.
-            resp = await client.post("/ecosystem/events", json={"type": "policy.freeze",
-                                                                "data": {"initiated_by": "hub"}})
+            resp = await client.post("/ecosystem/events", json=payload, headers=headers)
             return resp.status, await resp.json()
 
     status, body = asyncio.run(go())
