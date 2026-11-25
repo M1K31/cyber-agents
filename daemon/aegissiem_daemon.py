@@ -709,20 +709,21 @@ def create_api(db: Database, pipeline: ResponsePipeline, *, step_up_auth: Any = 
     async def post_ecosystem_event(request: web.Request) -> web.Response:
         """Receive mesh events from the ecosystem hub.
 
-        Previously the hub posted here (e.g. to propagate an emergency Freeze) but
-        the daemon had no route, so the hub marked it unreachable and the response
-        pipeline stayed unfrozen. Accept hub-signed peers or loopback, and apply a
-        mesh Freeze. Resume is intentionally NOT auto-applied — leaving Freeze
-        requires operator step-up via /api/policy/resume.
+        Requires a valid HMAC-signed ecosystem peer request (even on loopback) so
+        that an unauthenticated local process or test run cannot freeze the live
+        daemon. Resume is intentionally NOT auto-applied — leaving Freeze requires
+        operator step-up via /api/policy/resume.
         """
         body = await _read_json_optional(request)
         # A malicious page could POST {"type":"policy.freeze"} to this loopback
-        # route; reject cross-site browser requests so only genuine peers/loopback
-        # tools (which carry no browser Origin/Fetch-Metadata) can deliver events.
+        # route; reject cross-site browser requests first.
         if _is_cross_site_browser(request):
             return web.json_response({"detail": "Cross-site request rejected"}, status=403)
-        if not _is_loopback_request(request) and not _verify_hmac_peer(request, body):
-            return web.json_response({"detail": "Authentication required for mesh events"}, status=401)
+        if not _verify_hmac_peer(request, body):
+            return web.json_response(
+                {"detail": "Signed ecosystem peer authentication required for mesh events"},
+                status=401,
+            )
         etype = str(body.get("type") or body.get("event_type") or "")
         data = body.get("data") if isinstance(body.get("data"), dict) else body
         if etype in ("policy.freeze", "ecosystem.freeze", "containment.freeze"):

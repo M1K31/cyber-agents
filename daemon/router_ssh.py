@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import os
 import shlex
 from pathlib import Path
 from typing import Optional
@@ -11,23 +13,56 @@ import asyncssh
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_SSH_CONNECT_TIMEOUT = 10.0
+DEFAULT_KNOWN_HOSTS_PATH = "~/.aegissiem/known_hosts"
+
+
+def _resolve_known_hosts_path(known_hosts_path: Optional[str] = None) -> Path:
+    raw = (
+        known_hosts_path
+        or os.environ.get("ROUTER_SSH_KNOWN_HOSTS")
+        or DEFAULT_KNOWN_HOSTS_PATH
+    )
+    return Path(raw).expanduser()
+
 
 async def _ssh_connect(
     host: str,
     username: str = "admin",
     key_file: Optional[str] = None,
     port: int = 22,
+    *,
+    connect_timeout: float = DEFAULT_SSH_CONNECT_TIMEOUT,
+    known_hosts_path: Optional[str] = None,
+    allow_unverified_host_key: bool = False,
 ) -> asyncssh.SSHClientConnection:
-    """Create an SSH connection to the router."""
+    """Create an SSH connection to the router with connect timeout and pinned host keys.
+
+    Fail-closed by default: requires a pinned ``known_hosts`` file so MITM
+    attacks on the management LAN are rejected.
+    """
     opts: dict = {
         "host": host,
         "username": username,
         "port": port,
-        "known_hosts": None,  # Skip host key verification for router
+        "connect_timeout": float(connect_timeout),
+        "login_timeout": float(connect_timeout),
     }
+    if allow_unverified_host_key:
+        logger.warning("Connecting to router %s:%d with host key verification disabled", host, port)
+        opts["known_hosts"] = None
+    else:
+        kh_path = _resolve_known_hosts_path(known_hosts_path)
+        if not kh_path.is_file():
+            raise PermissionError(
+                f"Router SSH known_hosts file not found at {kh_path}. "
+                f"Pin the router host key first (e.g. ssh-keyscan -p {port} {host} >> {kh_path})."
+            )
+        opts["known_hosts"] = str(kh_path)
+
     if key_file:
         opts["client_keys"] = [str(Path(key_file).expanduser())]
-    return await asyncssh.connect(**opts)
+    return await asyncio.wait_for(asyncssh.connect(**opts), timeout=float(connect_timeout) + 5.0)
 
 
 async def _run_command(
@@ -37,6 +72,9 @@ async def _run_command(
     key_file: Optional[str] = None,
     port: int = 22,
     retries: int = 1,
+    *,
+    connect_timeout: float = DEFAULT_SSH_CONNECT_TIMEOUT,
+    known_hosts_path: Optional[str] = None,
 ) -> tuple[bool, str]:
     """Run a command on the router via SSH with retry.
 
@@ -45,7 +83,14 @@ async def _run_command(
     """
     for attempt in range(retries + 1):
         try:
-            async with await _ssh_connect(host, username, key_file, port) as conn:
+            async with await _ssh_connect(
+                host,
+                username,
+                key_file,
+                port,
+                connect_timeout=connect_timeout,
+                known_hosts_path=known_hosts_path,
+            ) as conn:
                 result = await conn.run(command, check=False)
                 output = (result.stdout or "") + (result.stderr or "")
                 if result.exit_status == 0:
@@ -55,7 +100,7 @@ async def _run_command(
                         "Command failed (attempt %d/%d) on %s: %s -> %s",
                         attempt + 1, retries + 1, host, command, output.strip(),
                     )
-        except (asyncssh.Error, OSError) as e:
+        except (asyncssh.Error, OSError, PermissionError, asyncio.TimeoutError) as e:
             logger.warning(
                 "SSH error (attempt %d/%d) connecting to %s: %s",
                 attempt + 1, retries + 1, host, e,
